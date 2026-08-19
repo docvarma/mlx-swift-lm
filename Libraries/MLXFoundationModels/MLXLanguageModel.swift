@@ -524,9 +524,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// omitted.
     public let configurationResolver: any ModelConfigurationResolver
 
+    /// Optional executor-boundary admission policy. The callback receives only
+    /// exact counts from the prepared `LMInput` and runs before every generation
+    /// phase.
+    public let requestAdmission: MLXRequestAdmission?
+
     /// Configuration the framework uses to create and cache executors.
     public var executorConfiguration: Executor.Configuration {
-        Executor.Configuration(modelID: modelID)
+        Executor.Configuration(modelID: modelID, requestAdmission: requestAdmission)
     }
 
     // MARK: - Initialization
@@ -558,12 +563,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
         configurationResolver: any ModelConfigurationResolver =
             DefaultConfigurationResolver(),
+        requestAdmission: MLXRequestAdmission? = nil,
         weightsLocation: @Sendable @escaping (String) -> URL,
         load: @escaping ContainerLoader
     ) {
         self.configuration = configuration
         self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
+        self.requestAdmission = requestAdmission
         self.weightsLocation = weightsLocation
         self.load = load
     }
@@ -878,14 +885,25 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         public struct Configuration: Hashable, Sendable {
             /// The model identifier this executor uses for loading and metadata.
             public let modelID: String
+            public let requestAdmission: MLXRequestAdmission?
+
+            public init(
+                modelID: String,
+                requestAdmission: MLXRequestAdmission? = nil
+            ) {
+                self.modelID = modelID
+                self.requestAdmission = requestAdmission
+            }
         }
 
         /// The model identifier this executor uses for loading and metadata.
         let modelID: String
+        let requestAdmission: MLXRequestAdmission?
 
         /// Creates an executor from a configuration.
         public init(configuration: Configuration) throws {
             self.modelID = configuration.modelID
+            self.requestAdmission = configuration.requestAdmission
         }
 
         /// Logs warmup failures from the fire-and-forget `prewarm` path. A
@@ -949,6 +967,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 collected = [Chat.Message.user("")]
             }
             let messages = collected
+            let attachmentCount = messages.reduce(into: 0) { count, message in
+                count += message.images.count + message.videos.count + message.audios.count
+            }
 
             // Vision capability gate (adapter-side). Labeled image
             // attachments arrive as public `.attachment` segments that
@@ -1223,6 +1244,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 requestedMaxTokens: requestedMaxTokens,
                                 requestedTemperature: request.generationOptions.temperature,
                                 samplingConfiguration: requestedSamplingConfiguration,
+                                attachmentCount: attachmentCount,
                                 reasoningEntryID: reasoningEntryID,
                                 context: context,
                                 channel: channel)
@@ -1249,6 +1271,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     input: input,
                                     modelID: modelID,
                                     requestedMaxTokens: requestedMaxTokens,
+                                    attachmentCount: attachmentCount,
                                     entryID: entryID,
                                     context: context,
                                     channel: channel)
@@ -1345,6 +1368,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 requestedTemperature: request.generationOptions
                                     .temperature,
                                 samplingConfiguration: requestedSamplingConfiguration,
+                                attachmentCount: attachmentCount,
                                 reasoningEntryID: reasoningEntryID,
                                 responseEntryID: entryID,
                                 context: context, channel: channel)
@@ -1369,34 +1393,44 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             : Self.continuationInput(
                                 from: toolAwareInput, appending: reasoningTokenIDs)
                         // Shared budget (match the unconstrained path): the
-                        // envelope continues under the remaining budget, floored
-                        // at the completion reserve so it always has room to close
-                        // the tool call.
-                        let phase2MaxTokens =
-                            reasoningTokenIDs.isEmpty
-                            ? maxTokens
-                            : Swift.max(
-                                maxTokens - reasoningTokenIDs.count, completionReserve)
+                        // envelope continues under only the remaining budget.
+                        // If reasoning consumed it all, report an incomplete
+                        // result rather than exceed the caller's reservation.
+                        let phase2MaxTokens = Swift.max(
+                            0, maxTokens - reasoningTokenIDs.count)
+                        guard phase2MaxTokens > 0 else {
+                            await Self.emitMetadata(
+                                ["incompleteOutput": true], entryID: entryID, into: channel)
+                            return
+                        }
 
                         var outputBuffer = ""
                         var incomplete = false
                         var generatedTokenCount: Int?
                         do {
-                            generatedTokenCount = try GuidedGenerationLoop.run(
-                                input: phase2Input,
-                                context: context,
-                                constraint: constraint,
-                                maxTokens: phase2MaxTokens,
-                                vocabSize: Int(xgTokenizer.vocabSize),
-                                completionReserve: completionReserve,
-                                hardReserve: hardReserve,
-                                closingBias: closingBias,
-                                whitespaceBias: whitespaceBias,
-                                whitespaceTokenIDs: whitespaceTokenIDs
-                            ) { text in
-                                outputBuffer += text
-                                GuidedGenerationDiagnosticSink.current?.recordEmit()
-                                return !Task.isCancelled
+                            generatedTokenCount = try await MLXRequestAdmission.perform(
+                                metrics: Self.metrics(
+                                    for: phase2Input,
+                                    reservedOutputTokenCount: phase2MaxTokens,
+                                    attachmentCount: attachmentCount),
+                                admission: requestAdmission
+                            ) {
+                                try GuidedGenerationLoop.run(
+                                    input: phase2Input,
+                                    context: context,
+                                    constraint: constraint,
+                                    maxTokens: phase2MaxTokens,
+                                    vocabSize: Int(xgTokenizer.vocabSize),
+                                    completionReserve: completionReserve,
+                                    hardReserve: hardReserve,
+                                    closingBias: closingBias,
+                                    whitespaceBias: whitespaceBias,
+                                    whitespaceTokenIDs: whitespaceTokenIDs
+                                ) { text in
+                                    outputBuffer += text
+                                    GuidedGenerationDiagnosticSink.current?.recordEmit()
+                                    return !Task.isCancelled
+                                }
                             }
                         } catch GuidedGenerationError.incompleteOutput {
                             incomplete = true
@@ -1420,7 +1454,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             let totalOutput = generatedTokenCount + reasoningCount
                             await Self.emitUsage(
                                 input: .init(
-                                    totalTokenCount: toolAwareInput.text.tokens.size,
+                                    totalTokenCount: phase2Input.text.tokens.size,
                                     cachedTokenCount: 0),
                                 output: .init(
                                     totalTokenCount: totalOutput,
@@ -1438,6 +1472,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             input: input,
                             modelID: modelID,
                             requestedMaxTokens: requestedMaxTokens,
+                            attachmentCount: attachmentCount,
                             entryID: entryID,
                             context: context,
                             channel: channel)
@@ -1448,6 +1483,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             requestedMaxTokens: requestedMaxTokens,
                             requestedTemperature: request.generationOptions.temperature,
                             samplingConfiguration: requestedSamplingConfiguration,
+                            attachmentCount: attachmentCount,
                             responseEntryID: entryID,
                             reasoningEntryID: reasoningEntryID,
                             context: context,
@@ -1491,6 +1527,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
+            attachmentCount: Int,
             reasoningEntryID: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
@@ -1499,6 +1536,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration)
+            let reservedOutputTokenCount = requestedMaxTokens ?? Self.defaultMaxTokens
             let format = context.configuration.toolCallFormat ?? .json
             var router = AllowedToolOutputRouter(
                 format: format,
@@ -1510,11 +1548,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 stopStrings: context.configuration.effectiveStopStrings)
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
             var result = AllowedToolGenerationResult()
-            let (stream, task) = try generateProtocolTokensTask(
-                input: input,
-                parameters: params,
-                context: context,
-                decoder: protocolDecoder)
+            let (stream, task) = try await MLXRequestAdmission.perform(
+                metrics: Self.metrics(
+                    for: input,
+                    reservedOutputTokenCount: reservedOutputTokenCount,
+                    attachmentCount: attachmentCount),
+                admission: requestAdmission
+            ) {
+                try generateProtocolTokensTask(
+                    input: input,
+                    parameters: params,
+                    context: context,
+                    decoder: protocolDecoder)
+            }
 
             do {
                 generationLoop: for await generation in stream {
@@ -1678,6 +1724,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             input: LMInput,
             modelID: String,
             requestedMaxTokens: Int?,
+            attachmentCount: Int,
             entryID: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
@@ -1716,21 +1763,29 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var incomplete = false
             var generatedTokenCount: Int?
             do {
-                generatedTokenCount = try GuidedGenerationLoop.run(
-                    input: input,
-                    context: context,
-                    constraint: constraint,
-                    maxTokens: maxTokens,
-                    vocabSize: Int(xgTokenizer.vocabSize),
-                    completionReserve: completionReserve,
-                    hardReserve: hardReserve,
-                    closingBias: bias.closing,
-                    whitespaceBias: bias.whitespace,
-                    whitespaceTokenIDs: bias.whitespaceTokenIDs
-                ) { text in
-                    textContinuation.yield(text)
-                    GuidedGenerationDiagnosticSink.current?.recordEmit()
-                    return !Task.isCancelled
+                generatedTokenCount = try await MLXRequestAdmission.perform(
+                    metrics: Self.metrics(
+                        for: input,
+                        reservedOutputTokenCount: maxTokens,
+                        attachmentCount: attachmentCount),
+                    admission: requestAdmission
+                ) {
+                    try GuidedGenerationLoop.run(
+                        input: input,
+                        context: context,
+                        constraint: constraint,
+                        maxTokens: maxTokens,
+                        vocabSize: Int(xgTokenizer.vocabSize),
+                        completionReserve: completionReserve,
+                        hardReserve: hardReserve,
+                        closingBias: bias.closing,
+                        whitespaceBias: bias.whitespace,
+                        whitespaceTokenIDs: bias.whitespaceTokenIDs
+                    ) { text in
+                        textContinuation.yield(text)
+                        GuidedGenerationDiagnosticSink.current?.recordEmit()
+                        return !Task.isCancelled
+                    }
                 }
             } catch GuidedGenerationError.incompleteOutput {
                 incomplete = true
@@ -1773,6 +1828,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
+            attachmentCount: Int,
             entryID: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
@@ -1784,12 +1840,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration
             )
+            let reservedOutputTokenCount = requestedMaxTokens ?? Self.defaultMaxTokens
 
-            for await generation in try generate(
-                input: input,
-                parameters: params,
-                context: context
+            let generations = try await MLXRequestAdmission.perform(
+                metrics: Self.metrics(
+                    for: input,
+                    reservedOutputTokenCount: reservedOutputTokenCount,
+                    attachmentCount: attachmentCount),
+                admission: requestAdmission
             ) {
+                try generate(input: input, parameters: params, context: context)
+            }
+            for await generation in generations {
                 try Task.checkCancellation()
                 switch generation {
                 case .chunk(let text):
@@ -1825,6 +1887,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
+            attachmentCount: Int,
             responseEntryID: String,
             reasoningEntryID: String,
             context: ModelContext,
@@ -1838,6 +1901,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
                     samplingConfiguration: samplingConfiguration,
+                    attachmentCount: attachmentCount,
                     responseEntryID: responseEntryID,
                     reasoningEntryID: reasoningEntryID,
                     context: context,
@@ -1848,6 +1912,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
                     samplingConfiguration: samplingConfiguration,
+                    attachmentCount: attachmentCount,
                     entryID: responseEntryID,
                     context: context,
                     channel: channel)
@@ -1868,6 +1933,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
+            attachmentCount: Int,
             responseEntryID: String,
             reasoningEntryID: String,
             context: ModelContext,
@@ -1878,6 +1944,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration
             )
+            let reservedOutputTokenCount = requestedMaxTokens ?? Self.defaultMaxTokens
 
             var emitter = ReasoningEventEmitter(
                 config: reasoningConfig, primedInside: primedInside)
@@ -1889,11 +1956,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
             var reasoningTokenCount = 0
             var completionInfo: GenerateCompletionInfo?
-            let (stream, task) = try generateProtocolTokensTask(
-                input: input,
-                parameters: params,
-                context: context,
-                decoder: protocolDecoder)
+            let (stream, task) = try await MLXRequestAdmission.perform(
+                metrics: Self.metrics(
+                    for: input,
+                    reservedOutputTokenCount: reservedOutputTokenCount,
+                    attachmentCount: attachmentCount),
+                admission: requestAdmission
+            ) {
+                try generateProtocolTokensTask(
+                    input: input,
+                    parameters: params,
+                    context: context,
+                    decoder: protocolDecoder)
+            }
 
             do {
                 generationLoop: for await generation in stream {
@@ -2130,6 +2205,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             maxTokens: Int,
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
+            attachmentCount: Int,
             reasoningEntryID: String,
             responseEntryID: String,
             context: ModelContext,
@@ -2144,8 +2220,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 config: config, primedInside: primedInside, tokenizer: context.tokenizer
             )
 
-            let (stream, task) = try generateTokensTask(
-                input: input, parameters: params, context: context)
+            let (stream, task) = try await MLXRequestAdmission.perform(
+                metrics: Self.metrics(
+                    for: input,
+                    reservedOutputTokenCount: maxTokens,
+                    attachmentCount: attachmentCount),
+                admission: requestAdmission
+            ) {
+                try generateTokensTask(
+                    input: input, parameters: params, context: context)
+            }
             var closed = false
             do {
                 for await generation in stream {
@@ -2183,6 +2267,28 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     reasoningEntryID: reasoningEntryID, channel: channel)
             }
             return (collector.reasoningTokenIDs, closed)
+        }
+
+        static func metrics(
+            for input: LMInput,
+            reservedOutputTokenCount: Int,
+            attachmentCount: Int
+        ) -> MLXRequestMetrics {
+            metrics(
+                inputTokenCount: input.text.tokens.size,
+                reservedOutputTokenCount: reservedOutputTokenCount,
+                attachmentCount: attachmentCount)
+        }
+
+        static func metrics(
+            inputTokenCount: Int,
+            reservedOutputTokenCount: Int,
+            attachmentCount: Int
+        ) -> MLXRequestMetrics {
+            MLXRequestMetrics(
+                inputTokenCount: inputTokenCount,
+                reservedOutputTokenCount: reservedOutputTokenCount,
+                attachmentCount: attachmentCount)
         }
 
         /// Parses a required-mode tool-calling envelope JSON object and emits

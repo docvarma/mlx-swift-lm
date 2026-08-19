@@ -3,6 +3,7 @@
 import CoreGraphics
 import Foundation
 import FoundationModels
+import ImageIO
 import MLXLMCommon
 import Testing
 
@@ -585,6 +586,47 @@ struct TranscriptConverterTests {
         #expect(messages.count == 1)
         #expect(messages[0].content == "line one\nline two")
         #expect(messages[0].images.count == 1)
+    }
+
+    @Test(
+        "Image attachments honor all EXIF orientations",
+        arguments: [
+            CGImagePropertyOrientation.up,
+            .upMirrored,
+            .down,
+            .downMirrored,
+            .leftMirrored,
+            .right,
+            .rightMirrored,
+            .left,
+        ])
+    func testImageOrientation(orientation: CGImagePropertyOrientation) throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let attachment = Transcript.AttachmentSegment(
+            content: .image(
+                Transcript.ImageAttachment(
+                    makeSolidCGImage(width: 3, height: 2),
+                    orientation: orientation)),
+            label: "oriented")
+        let prompt = Transcript.Prompt(
+            segments: [.attachment(attachment)],
+            responseFormat: nil)
+
+        let messages = TranscriptConverter.mlxMessages(for: [.prompt(prompt)])
+        let image = try #require(messages.first?.images.first)
+        guard case .ciImage(let ciImage) = image else {
+            Issue.record("Expected an in-memory CIImage")
+            return
+        }
+        let swapsAxes: Bool
+        switch orientation {
+        case .leftMirrored, .right, .rightMirrored, .left:
+            swapsAxes = true
+        default:
+            swapsAxes = false
+        }
+        #expect(ciImage.extent.width == (swapsAxes ? 2 : 3))
+        #expect(ciImage.extent.height == (swapsAxes ? 3 : 2))
     }
 
 }

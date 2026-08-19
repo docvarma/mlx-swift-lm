@@ -5,6 +5,7 @@
 
 import Foundation
 import FoundationModels
+import ImageIO
 import MLXLMCommon
 import os.log
 
@@ -177,7 +178,8 @@ struct TranscriptConverter {
             else {
                 return nil
             }
-            return .ciImage(imageAttachment.ciImage)
+            return .ciImage(
+                imageAttachment.ciImage.oriented(imageAttachment.orientation))
         }
     }
 }
