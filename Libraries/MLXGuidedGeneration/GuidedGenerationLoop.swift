@@ -181,6 +181,8 @@ public enum GuidedGenerationLoop {
 
         let clock = ContinuousClock()
         let startInstant = clock.now
+        var accumulatedText = ""
+
         // Logit dimension is constant across the generation; capture once so the
         // grammar-mask array can be built outside applyMaskAndSample.
         let logitDim = logits.shape[logits.ndim - 1]
@@ -318,6 +320,7 @@ public enum GuidedGenerationLoop {
             // Yield the sampled token
             detokenizer.append(token: tokenId)
             if let text = detokenizer.next() {
+                accumulatedText += text
                 if !emit(text) { break }
             }
             tokenCount += 1
@@ -328,7 +331,8 @@ public enum GuidedGenerationLoop {
                 let ms =
                     elapsed.components.seconds * 1000 + elapsed.components.attoseconds
                     / 1_000_000_000_000_000
-                logger.info("[GuidedGen] token=\(tokenCount) elapsed=\(ms)ms")
+                let prefix = String(accumulatedText.prefix(200))
+                logger.info("[GuidedGen] token=\(tokenCount) elapsed=\(ms)ms text=\(prefix)")
             }
 
             if commitResult.isTerminated {
@@ -365,6 +369,7 @@ public enum GuidedGenerationLoop {
                     diagnosticSink?.recordFastForwardToken(Int(ffToken))
                     detokenizer.append(token: Int(ffToken))
                     if let text = detokenizer.next() {
+                        accumulatedText += text
                         if !emit(text) {
                             shouldStopAfterFF = true
                             break
