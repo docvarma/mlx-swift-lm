@@ -1289,6 +1289,24 @@ struct MuseGlimmerAgenticProtocolTests {
         #expect(!events.contains { if case .response = $0 { true } else { false } })
         #expect(events.contains { if case .toolCall = $0 { true } else { false } })
     }
+
+    @Test(
+        "framed protocols fail closed when tokenizer controls are missing",
+        arguments: [ToolCallFormat.atem, ToolCallFormat.gptOSS])
+    func missingFramedControlsNeverUseStandardDecoder(_ format: ToolCallFormat) {
+        var decoder = format.makeTokenStreamDecoder(
+            tokenizer: MuseGlimmerStubTokenizer(), tools: Self.tools, stopStrings: [])
+        var events: [TokenStreamEvent] = []
+        #expect(
+            !decoder.push(1) { event in
+                events.append(event)
+                return true
+            })
+        #expect(events.count == 1)
+        #expect(events.contains { if case .protocolError = $0 { true } else { false } })
+        #expect(!events.contains { if case .response = $0 { true } else { false } })
+        #expect(!events.contains { if case .toolCall = $0 { true } else { false } })
+    }
 }
 
 @Suite("MuseGlimmer Onyx cache continuation")

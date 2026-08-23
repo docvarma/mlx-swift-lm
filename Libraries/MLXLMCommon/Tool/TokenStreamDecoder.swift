@@ -51,6 +51,35 @@ extension TokenStreamDecoder {
     package var rejectedToolCallCount: Int { 0 }
 }
 
+/// Fail-closed decoder returned when a framed model protocol cannot resolve
+/// its required tokenizer control vocabulary. It reports one semantic error
+/// and stops; it never reinterprets framed output as an ordinary tool dialect.
+struct UnavailableProtocolTokenStreamDecoder: TokenStreamDecoder {
+    private let message: String
+    private var reported = false
+
+    init(format: ToolCallFormat) {
+        self.message =
+            "The \(format.rawValue) tokenizer is missing required protocol control tokens"
+    }
+
+    mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool {
+        report(emit: emit)
+        return false
+    }
+
+    mutating func finish(emit: (TokenStreamEvent) -> Bool) -> Bool {
+        report(emit: emit)
+        return false
+    }
+
+    private mutating func report(emit: (TokenStreamEvent) -> Bool) {
+        guard !reported else { return }
+        reported = true
+        _ = emit(.protocolError(message))
+    }
+}
+
 /// Decoder for ordinary detokenized tool-call syntaxes.
 struct StandardTokenStreamDecoder: TokenStreamDecoder {
     private var detokenizer: NaiveStreamingDetokenizer

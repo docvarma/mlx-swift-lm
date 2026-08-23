@@ -60,6 +60,20 @@ public enum JSONValue: Hashable, Codable, Sendable {
         switch value {
         case is NSNull:
             return .null
+        case let number as NSNumber:
+            // JSONSerialization represents every scalar number as NSNumber.
+            // Swift bridging also makes NSNumber(1) satisfy `as Bool`, so a
+            // Bool-first type switch silently turns integer 1 into true. Use
+            // the Core Foundation boolean identity and NSNumber's encoding
+            // before converting the numeric payload.
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return .bool(number.boolValue)
+            }
+            let encoding = String(cString: number.objCType)
+            if encoding == "f" || encoding == "d" {
+                return .double(number.doubleValue)
+            }
+            return .int(number.intValue)
         case let bool as Bool:
             return .bool(bool)
         case let int as Int:

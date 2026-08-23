@@ -176,6 +176,9 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
         {
             return decoder
         }
+        if usesFramedTokenProtocol {
+            return UnavailableProtocolTokenStreamDecoder(format: self)
+        }
         return StandardTokenStreamDecoder(
             tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings)
     }
@@ -201,6 +204,19 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
         case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
             .mistral, .llama3:
             return nil
+        }
+    }
+
+    /// Whether this format owns token-level response framing rather than only
+    /// a detokenized tool-call syntax. A framed protocol must never fall back
+    /// to ``StandardTokenStreamDecoder`` when its control tokens are missing.
+    package var usesFramedTokenProtocol: Bool {
+        switch self {
+        case .gptOSS, .atem:
+            true
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2,
+            .minimaxM2, .mistral, .llama3:
+            false
         }
     }
 
@@ -249,7 +265,7 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     }
 
     /// Generate an ID compatible with this tool-call syntax.
-    func generateToolCallID() -> String {
+    package func generateToolCallID() -> String {
         let uuid = UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
         switch self {

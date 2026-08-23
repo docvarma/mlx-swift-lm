@@ -316,6 +316,166 @@ struct ToolCallingSchemaTests {
 
     // MARK: - Grammar Builder
 
+    @Test(arguments: ToolCallFormat.allCases)
+    func requiredToolGrammarCompilesForEveryPublicFormat(_ format: ToolCallFormat) throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let weather = Transcript.ToolDefinition(
+            name: "get_weather",
+            description: "Get current weather",
+            parameters: WeatherArgs.generationSchema)
+        let bookTrip = Transcript.ToolDefinition(
+            name: "book_trip",
+            description: "Book a trip",
+            parameters: BookTripArgs.generationSchema)
+        let grammar = try SchemaConverter.encodeRequiredToolCallingGrammar(
+            tools: [weather, bookTrip], format: format)
+
+        if format == .atem {
+            #expect(grammar.contains(" to=get_weather<|message|><atem:function_calls>"))
+            #expect(grammar.contains("<|start|>assistant to=get_weather<|message|>"))
+            #expect(grammar.contains("<|eot|>"))
+        }
+
+        _ = try GrammarConstraint(
+            tokenizer: makeByteTokenizer(),
+            structuralTag: grammar,
+            fastForward: false)
+    }
+
+    @Test(
+        arguments: [
+            (
+                ToolCallFormat.gemma,
+                "<start_function_call>call:get_weather{location:<escape>Boston<escape>}<end_function_call>"
+            ),
+            (
+                ToolCallFormat.gemma4,
+                "<|tool_call>call:get_weather{location:<|\"|>Boston<|\"|>}<tool_call|>"
+            ),
+            (
+                ToolCallFormat.mistral,
+                "[TOOL_CALLS]get_weather[ARGS]{\"location\":\"Boston\"}"
+            ),
+            (
+                ToolCallFormat.atem,
+                "<atem:function_calls><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Boston</atem:parameter></atem:invoke></atem:function_calls>"
+            ),
+            (
+                ToolCallFormat.glm4,
+                "<tool_call>\nget_weather<arg_key>location</arg_key><arg_value>Boston</arg_value>\n</tool_call>"
+            ),
+        ])
+    func priorityFamilyParsersRoundTripNativeRequiredCalls(
+        _ example: (format: ToolCallFormat, output: String)
+    ) throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let weather = Transcript.ToolDefinition(
+            name: "get_weather",
+            description: "Get current weather",
+            parameters: WeatherArgs.generationSchema)
+        let specs = try ToolCallingConversions.makeToolSpecs(from: [weather])
+        let processor = ToolCallProcessor(format: example.format, tools: specs)
+        let outputs =
+            processor.processChunkOutputs(example.output)
+            + processor.processEOSOutputs()
+        let calls = outputs.compactMap { output -> MLXLMCommon.ToolCall? in
+            guard case .toolCall(let call) = output else { return nil }
+            return call
+        }
+
+        #expect(calls.count == 1)
+        #expect(calls.first?.function.name == "get_weather")
+        #expect(calls.first?.function.arguments["location"] == .string("Boston"))
+        if example.format == .mistral {
+            #expect(calls.first?.id?.count == 9)
+        } else {
+            #expect(calls.first?.id?.hasPrefix("call_") == true)
+        }
+    }
+
+    @Test
+    func gemmaParsersPreserveCompositeJSONArguments() {
+        let tools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "configure",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "items": ["type": "array"],
+                            "settings": ["type": "object"],
+                        ] as [String: any Sendable],
+                        "required": ["items", "settings"],
+                        "additionalProperties": false,
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable]
+            ]
+        ]
+        for (format, output) in [
+            (
+                ToolCallFormat.gemma,
+                "<start_function_call>call:configure{items:[1,2],settings:{\"a\":1,\"b\":2}}<end_function_call>"
+            ),
+            (
+                ToolCallFormat.gemma4,
+                "<|tool_call>call:configure{items:[1,2],settings:{\"a\":1,\"b\":2}}<tool_call|>"
+            ),
+        ] {
+            let processor = ToolCallProcessor(format: format, tools: tools)
+            let outputs =
+                processor.processChunkOutputs(output) + processor.processEOSOutputs()
+            let calls = outputs.compactMap { item -> MLXLMCommon.ToolCall? in
+                guard case .toolCall(let call) = item else { return nil }
+                return call
+            }
+            #expect(calls.count == 1)
+            #expect(calls.first?.function.arguments["items"] == .array([.int(1), .int(2)]))
+            #expect(
+                calls.first?.function.arguments["settings"]
+                    == .object(["a": .int(1), "b": .int(2)]))
+        }
+    }
+
+    @Test
+    func glmParserAcceptsAuthorizedZeroArgumentTool() {
+        let tools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "heartbeat",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [:] as [String: any Sendable],
+                        "required": [] as [String],
+                        "additionalProperties": false,
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable]
+            ]
+        ]
+        let processor = ToolCallProcessor(format: .glm4, tools: tools)
+        let outputs =
+            processor.processChunkOutputs("<tool_call>\nheartbeat\n</tool_call>")
+            + processor.processEOSOutputs()
+        let calls = outputs.compactMap { item -> MLXLMCommon.ToolCall? in
+            guard case .toolCall(let call) = item else { return nil }
+            return call
+        }
+        #expect(calls.count == 1)
+        #expect(calls.first?.function.arguments.isEmpty == true)
+    }
+
+    @Test
+    func onyxResponseGrammarCompiles() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let schema = try JSONEncoder().encode(WeatherArgs.generationSchema)
+        let grammar = try SchemaConverter.encodeOnyxResponseGrammar(
+            schemaJSON: String(decoding: schema, as: UTF8.self))
+        #expect(grammar.contains(" to=user<|message|>"))
+        #expect(grammar.contains("<|start|>assistant to=user<|message|>"))
+        #expect(grammar.contains("<|eot|>"))
+        _ = try GrammarConstraint(
+            tokenizer: makeByteTokenizer(), structuralTag: grammar, fastForward: false)
+    }
+
     @Test
     func harmonyResponseGrammarConstrainsOnlyFinalPayload() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }

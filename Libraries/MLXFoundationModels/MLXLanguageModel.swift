@@ -28,6 +28,23 @@ enum ConstraintKind {
     case structuralTag
 }
 
+/// A selected model-family response protocol cannot be constructed from the
+/// loaded tokenizer. Framed protocols fail before sampling instead of silently
+/// degrading to the ordinary detokenized decoder.
+public struct ModelProtocolError: Error, Sendable, Equatable, LocalizedError {
+    public let format: ToolCallFormat
+    public let problem: String
+
+    public init(format: ToolCallFormat, problem: String) {
+        self.format = format
+        self.problem = problem
+    }
+
+    public var errorDescription: String? {
+        "The \(format.rawValue) model protocol failed: \(problem)"
+    }
+}
+
 // MARK: - Tokenizer Bias Cache Entry
 
 /// Tokenizer-derived logit biases, cached per model. Both arrays are pure
@@ -1116,6 +1133,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     let resolved = configurationResolver.resolve(
                         context.configuration, for: descriptor)
                     let toolCallFormat = resolved.toolCallFormat ?? .json
+                    try Self.validateFramedProtocol(
+                        toolCallFormat, tokenizer: context.tokenizer)
 
                     // GPT-OSS learns the selected response format from the
                     // developer message; grammar masking alone does not tell it
@@ -1342,11 +1361,69 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                         into: channel)
                                 }
                             } else if let schemaJSON {
+                                // Allowed-tool choice and structured response
+                                // are distinct generations. Rebuild the second
+                                // prompt without the offered tool surface and
+                                // restore the selected family's response-format
+                                // instruction and reasoning state.
+                                let schemaMessages: [Chat.Message]
+                                if Self.usesHarmonyResponseFormat(
+                                    schemaPresent: true,
+                                    toolsEnabled: false,
+                                    toolCallFormat: toolCallFormat)
+                                {
+                                    let instruction =
+                                        try SchemaConverter
+                                        .harmonyResponseFormatInstruction(
+                                            schemaJSON: schemaJSON)
+                                    schemaMessages = Self.appendingDeveloperInstruction(
+                                        instruction, to: messages)
+                                } else {
+                                    schemaMessages = messages
+                                }
+
+                                var schemaInput = try await context.processor.prepare(
+                                    input: UserInput(chat: schemaMessages))
+                                var schemaReasoningSetup:
+                                    (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
+                                var schemaReasoningEnabled = false
+                                if let reasoningConfig = resolved.reasoningConfig {
+                                    if declaresReasoning {
+                                        let thinkingEnabled = Self.thinkingEnabled(
+                                            for: request.contextOptions.reasoningLevel)
+                                        schemaReasoningEnabled = thinkingEnabled != false
+                                        schemaInput = try await Self.preparedInput(
+                                            messages: schemaMessages,
+                                            config: reasoningConfig,
+                                            thinkingEnabled: thinkingEnabled,
+                                            processor: context.processor,
+                                            cannotDisableMessage:
+                                                "This model always reasons; reasoning cannot be disabled via reasoningLevel."
+                                        )
+                                        schemaReasoningSetup = (
+                                            schemaInput,
+                                            reasoningConfig,
+                                            Self.reasoningPrimedInside(
+                                                input: schemaInput,
+                                                config: reasoningConfig,
+                                                tokenizer: context.tokenizer)
+                                        )
+                                    } else {
+                                        schemaInput = try await Self.preparedInput(
+                                            messages: schemaMessages,
+                                            config: reasoningConfig,
+                                            thinkingEnabled: false,
+                                            processor: context.processor,
+                                            cannotDisableMessage:
+                                                "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
+                                        )
+                                    }
+                                }
                                 try await runSchemaGeneration(
                                     schemaJSON: schemaJSON,
-                                    input: input,
-                                    reasoningSetup: nil,
-                                    reasoningEnabled: false,
+                                    input: schemaInput,
+                                    reasoningSetup: schemaReasoningSetup,
+                                    reasoningEnabled: schemaReasoningEnabled,
                                     toolCallFormat: toolCallFormat,
                                     modelID: modelID,
                                     requestedMaxTokens: requestedMaxTokens,
@@ -1386,16 +1463,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 additionalContext: toolAwareContext))
 
                         let usesHarmonyToolGrammar = toolCallFormat == .gptOSS
-                        let toolCallingGrammar: String
-                        if usesHarmonyToolGrammar {
-                            toolCallingGrammar =
-                                try SchemaConverter.encodeHarmonyToolCallingGrammar(
-                                    tools: requiredToolDefinitions)
-                        } else {
-                            toolCallingGrammar =
-                                try SchemaConverter.encodeToolCallingGrammar(
-                                    tools: requiredToolDefinitions)
-                        }
+                        let toolCallingGrammar =
+                            try SchemaConverter.encodeRequiredToolCallingGrammar(
+                                tools: requiredToolDefinitions,
+                                format: toolCallFormat)
                         // The inner JSON envelope is still needed separately to
                         // seed `CompletionReserve` -- the wrapper tokens
                         // (`<tool_call>`, two `\n`s, `</tool_call>`) are small
@@ -1571,9 +1642,30 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     parsedName: nil)
                                 incomplete = true
                             }
+                        } else if !incomplete, toolCallFormat == .atem {
+                            if let call = Self.decodeRequiredFramedToolCall(
+                                tokenIDs: generatedTokenIDs,
+                                sampledStopTokenID: sampledStopTokenID,
+                                grammarTerminated: grammarTerminated,
+                                format: toolCallFormat,
+                                toolSpecs: toolSpecs,
+                                tokenizer: context.tokenizer)
+                            {
+                                incomplete =
+                                    !(await emitRequiredToolCallEvent(
+                                        call: call,
+                                        toolCallsEntryID: toolCallsEntryID,
+                                        channel: channel))
+                            } else {
+                                GuidedGenerationDiagnosticSink.current?.recordParse(
+                                    parsedAsToolCall: false, parsedName: nil)
+                                incomplete = true
+                            }
                         } else if !incomplete {
                             let emitted = await emitRequiredToolCallEvent(
                                 outputBuffer: outputBuffer,
+                                toolCallFormat: toolCallFormat,
+                                toolSpecs: toolSpecs,
                                 toolCallsEntryID: toolCallsEntryID,
                                 channel: channel)
                             incomplete = !emitted
@@ -1670,6 +1762,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var completionInfo: GenerateCompletionInfo?
             var reasoningTokenCount = 0
             var endedInsideReasoning = false
+            var protocolError: String?
         }
 
         private func runAllowedToolGeneration(
@@ -1797,6 +1890,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if let rejection = result.rejectedToolCalls.first {
                 throw RejectedToolCallError(rejection)
             }
+            if let protocolError = result.protocolError {
+                throw ModelProtocolError(
+                    format: toolCallFormat, problem: protocolError)
+            }
             return result
         }
 
@@ -1810,7 +1907,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             case .response(let text): result.responseText += text
             case .toolCall(let call): result.toolCalls.append(call)
             case .rejectedToolCall(let rejection): result.rejectedToolCalls.append(rejection)
-            case .protocolError(let message): Self.protocolLogger.error("\(message)")
+            case .protocolError(let message):
+                result.protocolError = result.protocolError ?? message
+                return false
             case .stop: return false
             }
             return true
@@ -1893,6 +1992,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async throws {
             let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
             let usesHarmonyGrammar = toolCallFormat == .gptOSS
+            let usesOnyxGrammar = toolCallFormat == .atem
             let usesQwen3Grammar =
                 reasoningEnabled
                 && reasoningSetup?.config == QwenReasoningProtocol.qwen3
@@ -1979,6 +2079,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if usesHarmonyGrammar {
                 constraintKind = .structuralTag
                 constraintSource = try SchemaConverter.encodeHarmonyResponseGrammar(
+                    schemaJSON: schemaJSON)
+            } else if usesOnyxGrammar {
+                constraintKind = .structuralTag
+                constraintSource = try SchemaConverter.encodeOnyxResponseGrammar(
                     schemaJSON: schemaJSON)
             } else if usesQwen3Grammar, let reasoningSetup {
                 constraintKind = .structuralTag
@@ -2077,6 +2181,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             destination: .reasoning,
                             into: channel)
                     }
+                } else {
+                    incomplete = true
+                }
+            } else if !incomplete, usesOnyxGrammar {
+                if let decoded = Self.decodeRequiredFramedResponse(
+                    tokenIDs: generatedTokenIDs,
+                    sampledStopTokenID: sampledStopTokenID,
+                    grammarTerminated: grammarTerminated,
+                    format: .atem,
+                    tokenizer: context.tokenizer)
+                {
+                    responseText = decoded
                 } else {
                     incomplete = true
                 }
@@ -2292,6 +2408,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var reasoningTokenCount = 0
             var emittedResponseText = false
             var completionInfo: GenerateCompletionInfo?
+            var protocolFailure: String?
+            var rejectedFailure: RejectedToolCall?
             let (stream, task) = try await MLXRequestAdmission.perform(
                 metrics: Self.metrics(
                     for: input,
@@ -2323,9 +2441,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 case .response(let text): segments.append(.response(text))
                                 case .toolCall: break
                                 case .rejectedToolCall(let rejection):
-                                    Self.logRejectedToolCall(rejection)
+                                    rejectedFailure = rejectedFailure ?? rejection
+                                    shouldContinue = false
                                 case .protocolError(let message):
-                                    Self.protocolLogger.error("\(message)")
+                                    protocolFailure = protocolFailure ?? message
+                                    shouldContinue = false
                                 case .stop: shouldContinue = false
                                 }
                                 return shouldContinue
@@ -2382,9 +2502,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     case .response(let text): segments.append(.response(text))
                     case .toolCall, .stop: break
                     case .rejectedToolCall(let rejection):
-                        Self.logRejectedToolCall(rejection)
+                        rejectedFailure = rejectedFailure ?? rejection
                     case .protocolError(let message):
-                        Self.protocolLogger.error("\(message)")
+                        protocolFailure = protocolFailure ?? message
                     }
                     return true
                 }
@@ -2405,6 +2525,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         || emittedResponseText
                 }
                 endedInsideReasoning = emitter.isInsideReasoning
+            }
+
+            if let rejectedFailure {
+                throw RejectedToolCallError(rejectedFailure)
+            }
+            if let protocolFailure {
+                throw ModelProtocolError(
+                    format: toolCallFormat, problem: protocolFailure)
             }
 
             // A turn is incomplete when generation stops inside private reasoning
@@ -2664,54 +2792,157 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 attachmentCount: attachmentCount)
         }
 
-        /// Parses a required-mode tool-calling envelope JSON object and emits
-        /// its developer tool call.
+        /// Parses one required-mode call in the resolved model family's native
+        /// protocol and emits its developer tool call.
         ///
-        /// The output buffer is expected to be a JSON object matching the
-        /// shape `{"name": <tool-name>, "arguments": <args>}`. Grammars from
-        /// `SchemaConverter.encodeToolCallingGrammar` guarantee either that
-        /// shape directly (bare JSON) or that shape wrapped in Qwen's
-        /// `<tool_call>\n...\n</tool_call>` special-token delimiters --
-        /// `unwrapToolCallMarkers` below strips the wrapper if present. The
-        /// guided path emits a single `.toolCallDelta` with the arguments JSON
-        /// and a freshly minted toolCallID.
+        /// The same public ``ToolCallFormat`` selects both the guided grammar
+        /// and `ToolCallProcessor`, so Gemma, Mistral, GLM, ATEM, Qwen, Llama,
+        /// and other registered families are never decoded as generic JSON.
+        /// Exactly one authorized call is required; response text, rejected
+        /// calls, and multiple calls fail closed.
         ///
         /// Required mode never degrades malformed or partial output into a
         /// response event.
         private func emitRequiredToolCallEvent(
             outputBuffer: String,
+            toolCallFormat: ToolCallFormat,
+            toolSpecs: [[String: any Sendable]],
             toolCallsEntryID: String,
             channel: LanguageModelExecutorGenerationChannel
         ) async -> Bool {
-            let unwrapped = Self.unwrapToolCallMarkers(outputBuffer)
-            let data = Data(unwrapped.utf8)
+            let processor = ToolCallProcessor(format: toolCallFormat, tools: toolSpecs)
+            let outputs =
+                processor.processChunkOutputs(outputBuffer) + processor.processEOSOutputs()
+            let calls = outputs.compactMap { output -> MLXLMCommon.ToolCall? in
+                guard case .toolCall(let call) = output else { return nil }
+                return call
+            }
             guard
-                let obj = try? JSONSerialization.jsonObject(with: data)
-                    as? [String: Any],
-                let name = obj["name"] as? String
+                outputs.allSatisfy({ output in
+                    if case .toolCall = output { return true }
+                    return false
+                }), calls.count == 1, let call = calls.first
             else {
                 GuidedGenerationDiagnosticSink.current?.recordParse(
                     parsedAsToolCall: false, parsedName: nil)
                 return false
             }
 
-            GuidedGenerationDiagnosticSink.current?.recordParse(
-                parsedAsToolCall: true, parsedName: name)
+            return await emitRequiredToolCallEvent(
+                call: call,
+                toolCallsEntryID: toolCallsEntryID,
+                channel: channel)
+        }
 
-            guard
-                let arguments = obj["arguments"],
-                let argumentsData = try? JSONSerialization.data(withJSONObject: arguments),
+        private func emitRequiredToolCallEvent(
+            call: MLXLMCommon.ToolCall,
+            toolCallsEntryID: String,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async -> Bool {
+            GuidedGenerationDiagnosticSink.current?.recordParse(
+                parsedAsToolCall: true, parsedName: call.function.name)
+
+            guard let argumentsData = try? JSONEncoder().encode(call.function.arguments),
                 let argumentsJSON = String(data: argumentsData, encoding: .utf8)
             else {
                 return false
             }
             await Self.emitToolCall(
-                id: UUID().uuidString,
-                name: name,
+                id: call.id ?? ToolCallFormat.json.generateToolCallID(),
+                name: call.function.name,
                 arguments: argumentsJSON,
                 entryID: toolCallsEntryID,
                 into: channel)
             return true
+        }
+
+        private static func validateFramedProtocol(
+            _ format: ToolCallFormat,
+            tokenizer: any Tokenizer
+        ) throws {
+            guard format.usesFramedTokenProtocol else { return }
+            guard
+                format.makeProtocolTokenStreamDecoder(
+                    tokenizer: tokenizer, tools: nil, stopStrings: []) != nil
+            else {
+                throw ModelProtocolError(
+                    format: format,
+                    problem: "the tokenizer is missing required control tokens")
+            }
+        }
+
+        private static func decodeRequiredFramedToolCall(
+            tokenIDs: [Int],
+            sampledStopTokenID: Int?,
+            grammarTerminated: Bool,
+            format: ToolCallFormat,
+            toolSpecs: [[String: any Sendable]],
+            tokenizer: any Tokenizer
+        ) -> MLXLMCommon.ToolCall? {
+            guard grammarTerminated,
+                var decoder = format.makeProtocolTokenStreamDecoder(
+                    tokenizer: tokenizer, tools: toolSpecs, stopStrings: [])
+            else { return nil }
+
+            var calls: [MLXLMCommon.ToolCall] = []
+            var invalid = false
+            func consume(_ event: TokenStreamEvent) -> Bool {
+                switch event {
+                case .toolCall(let call): calls.append(call)
+                case .stop: break
+                case .reasoning, .response, .rejectedToolCall, .protocolError:
+                    invalid = true
+                }
+                return !invalid
+            }
+
+            for token in tokenIDs where !invalid {
+                if !decoder.push(token, emit: consume) { invalid = true }
+            }
+            if let sampledStopTokenID, !invalid,
+                !decoder.push(sampledStopTokenID, emit: consume)
+            {
+                invalid = true
+            }
+            if !invalid, !decoder.finish(emit: consume) { invalid = true }
+            guard !invalid, calls.count == 1 else { return nil }
+            return calls[0]
+        }
+
+        private static func decodeRequiredFramedResponse(
+            tokenIDs: [Int],
+            sampledStopTokenID: Int?,
+            grammarTerminated: Bool,
+            format: ToolCallFormat,
+            tokenizer: any Tokenizer
+        ) -> String? {
+            guard grammarTerminated,
+                var decoder = format.makeProtocolTokenStreamDecoder(
+                    tokenizer: tokenizer, tools: nil, stopStrings: [])
+            else { return nil }
+
+            var response = ""
+            var invalid = false
+            func consume(_ event: TokenStreamEvent) -> Bool {
+                switch event {
+                case .response(let text): response += text
+                case .stop: break
+                case .reasoning, .toolCall, .rejectedToolCall, .protocolError:
+                    invalid = true
+                }
+                return !invalid
+            }
+
+            for token in tokenIDs where !invalid {
+                if !decoder.push(token, emit: consume) { invalid = true }
+            }
+            if let sampledStopTokenID, !invalid,
+                !decoder.push(sampledStopTokenID, emit: consume)
+            {
+                invalid = true
+            }
+            if !invalid, !decoder.finish(emit: consume) { invalid = true }
+            return !invalid && !response.isEmpty ? response : nil
         }
 
         private static func isJSONObject(_ text: String) -> Bool {
@@ -2723,29 +2954,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             return value is [String: Any]
         }
 
-        /// Strips Qwen-style `<tool_call>\n...\n</tool_call>` wrapper markers
-        /// if present, returning the inner JSON text. Untouched if the buffer
-        /// doesn't start with a wrapper -- the `bare_call` grammar alternative
-        /// is valid output and parses directly.
-        ///
-        /// The inner newlines around the JSON come from the Qwen training
-        /// format; we're tolerant of whitespace on either side of the markers
-        /// so that tokenizer decoding quirks (extra spaces, missing newlines)
-        /// don't cause the JSON parse to fail.
-        private static func unwrapToolCallMarkers(_ buffer: String) -> String {
-            let trimmed = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
-            let openMarker = "<tool_call>"
-            let closeMarker = "</tool_call>"
-            guard trimmed.hasPrefix(openMarker) else { return buffer }
-            let afterOpen = trimmed.dropFirst(openMarker.count)
-            let inner: Substring
-            if let closeRange = afterOpen.range(of: closeMarker, options: .backwards) {
-                inner = afterOpen[afterOpen.startIndex ..< closeRange.lowerBound]
-            } else {
-                inner = afterOpen
-            }
-            return inner.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
     }
 }
 

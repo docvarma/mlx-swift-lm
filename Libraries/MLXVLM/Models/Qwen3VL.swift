@@ -2041,5 +2041,6 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
 extension Qwen3VL {
     // Qwen3-VL shares Qwen's tags and tool-call boundary, but does not declare
     // the original Qwen3 family's model-specific hard-budget transition.
+    public var toolCallFormat: ToolCallFormat? { .json }
     public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
 }

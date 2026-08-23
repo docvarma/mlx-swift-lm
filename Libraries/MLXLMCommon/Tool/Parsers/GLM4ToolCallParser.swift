@@ -22,7 +22,10 @@ public struct GLM4ToolCallParser: ToolCallParser, Sendable {
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Extract function name (everything before first <arg_key>)
-        guard let argKeyStart = text.range(of: "<arg_key>") else { return nil }
+        guard let argKeyStart = text.range(of: "<arg_key>") else {
+            guard !text.isEmpty, !text.contains("<arg_") else { return nil }
+            return ToolCall(function: .init(name: text, arguments: [:]))
+        }
         let funcName = String(text[..<argKeyStart.lowerBound]).trimmingCharacters(
             in: .whitespacesAndNewlines)
 
