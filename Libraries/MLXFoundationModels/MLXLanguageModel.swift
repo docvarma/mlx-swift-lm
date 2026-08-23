@@ -738,6 +738,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     action: .appendText("", tokenCount: 0)))
         }
 
+        static func emitReasoningTerminalMetadata(
+            endedInsideReasoning: Bool,
+            emittedResponseText: Bool,
+            entryID: String,
+            into channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            guard endedInsideReasoning || !emittedResponseText else { return }
+            if !emittedResponseText {
+                // FoundationModels retains response-scoped metadata and usage only
+                // after an entry has been established. This zero-content marker
+                // preserves the true incomplete turn without inventing answer text.
+                await establishEmptyResponseEntry(entryID: entryID, into: channel)
+            }
+            await emitMetadata(
+                ["incompleteOutput": true], entryID: entryID, into: channel)
+        }
+
         static func emitUsage(
             input: LanguageModelExecutorGenerationChannel.Usage.Input,
             output: LanguageModelExecutorGenerationChannel.Usage.Output,
@@ -2055,22 +2072,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 endedInsideReasoning = emitter.isInsideReasoning
             }
 
-            // If generation ended while still inside a thinking block, the model
-            // was cut off mid-thought (e.g. it exhausted the token budget before
-            // emitting `</think>`). Signal it so a consumer doesn't mistake an
-            // empty or partial answer for the model's chosen response — mirrors
-            // the guided path's `incompleteOutput` convention.
-            if endedInsideReasoning {
-                if !emittedResponseText {
-                    // FoundationModels retains response-scoped metadata and usage only
-                    // after an entry has been established. This zero-content marker
-                    // preserves the true incomplete turn without inventing answer text.
-                    await Self.establishEmptyResponseEntry(
-                        entryID: responseEntryID, into: channel)
-                }
-                await Self.emitMetadata(
-                    ["incompleteOutput": true], entryID: responseEntryID, into: channel)
-            }
+            // A turn is incomplete when generation stops inside private reasoning
+            // or closes that frame without ever producing a public response.
+            await Self.emitReasoningTerminalMetadata(
+                endedInsideReasoning: endedInsideReasoning,
+                emittedResponseText: emittedResponseText,
+                entryID: responseEntryID,
+                into: channel)
 
             if let info = completionInfo {
                 // Single source of truth for usage: one authoritative
