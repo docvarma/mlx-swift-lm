@@ -738,7 +738,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     action: .appendText("", tokenCount: 0)))
         }
 
-        static func emitReasoningTerminalMetadata(
+        static func emitTextTerminalMetadata(
             endedInsideReasoning: Bool,
             emittedResponseText: Bool,
             entryID: String,
@@ -1851,31 +1851,42 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             ) {
                 try generate(input: input, parameters: params, context: context)
             }
+            var emittedResponseText = false
+            var completionInfo: GenerateCompletionInfo?
             for await generation in generations {
                 try Task.checkCancellation()
                 switch generation {
                 case .chunk(let text):
+                    emittedResponseText = emittedResponseText || !text.isEmpty
                     await Self.emit(
                         text: text, entryID: entryID, destination: .response, into: channel)
                 case .info(let info):
-                    // MLX-LM emits one .info event at end-of-generation with
-                    // authoritative scalar token counts (`totalPromptTokenCount`
-                    // is the rendered prompt, of which `cachedPromptTokenCount`
-                    // came from a reused KV-cache prefix; `generationTokenCount`
-                    // is the model-generated completion -- see Evaluate.swift's
-                    // `GenerateCompletionInfo` definition).
-                    await Self.emitUsage(
-                        input: .init(
-                            totalTokenCount: info.totalPromptTokenCount,
-                            cachedTokenCount: info.cachedPromptTokenCount),
-                        output: .init(
-                            totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
-                        entryID: entryID, into: channel)
+                    completionInfo = info
                 case .toolCall(_):
                     break
                 case .rejectedToolCall(let rejection):
                     throw RejectedToolCallError(rejection)
                 }
+            }
+            await Self.emitTextTerminalMetadata(
+                endedInsideReasoning: false,
+                emittedResponseText: emittedResponseText,
+                entryID: entryID,
+                into: channel)
+            if let info = completionInfo {
+                // MLX-LM emits one .info event at end-of-generation with
+                // authoritative scalar token counts (`totalPromptTokenCount`
+                // is the rendered prompt, of which `cachedPromptTokenCount`
+                // came from a reused KV-cache prefix; `generationTokenCount`
+                // is the model-generated completion -- see Evaluate.swift's
+                // `GenerateCompletionInfo` definition).
+                await Self.emitUsage(
+                    input: .init(
+                        totalTokenCount: info.totalPromptTokenCount,
+                        cachedTokenCount: info.cachedPromptTokenCount),
+                    output: .init(
+                        totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
+                    entryID: entryID, into: channel)
             }
         }
 
@@ -2074,7 +2085,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             // A turn is incomplete when generation stops inside private reasoning
             // or closes that frame without ever producing a public response.
-            await Self.emitReasoningTerminalMetadata(
+            await Self.emitTextTerminalMetadata(
                 endedInsideReasoning: endedInsideReasoning,
                 emittedResponseText: emittedResponseText,
                 entryID: responseEntryID,
