@@ -5,6 +5,7 @@
 import Testing
 import Foundation
 import MLXGuidedGeneration
+import MLXLMCommon
 import FoundationModels
 @testable import MLXFoundationModels
 
@@ -262,7 +263,7 @@ struct ToolCallingSchemaTests {
     }
 
     @Test
-    func grammarBuilderHoistsNestedDefsInBothArms() throws {
+    func grammarBuilderKeepsNestedDefsResolvableInBothArms() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let bookTrip = Transcript.ToolDefinition(
             name: "book_trip",
@@ -277,13 +278,20 @@ struct ToolCallingSchemaTests {
         let elements = try #require(format["elements"] as? [[String: Any]])
         try #require(elements.count == 2)
 
-        let wrappedSchema = try #require(
-            (elements[0]["content"] as? [String: Any])?["json_schema"] as? [String: Any]
-        )
-        let bareSchema = try #require(elements[1]["json_schema"] as? [String: Any])
+        let wrappedTools = try #require(elements[0]["content"] as? [String: Any])
+        let wrappedTags = try #require(wrappedTools["elements"] as? [[String: Any]])
+        let wrappedContent = try #require(wrappedTags.first?["content"] as? [String: Any])
+        let wrappedSchema = try #require(wrappedContent["json_schema"] as? [String: Any])
+
+        let bareTools = elements[1]
+        let bareTags = try #require(bareTools["elements"] as? [[String: Any]])
+        let bareContent = try #require(bareTags.first?["content"] as? [String: Any])
+        let bareSchema = try #require(bareContent["json_schema"] as? [String: Any])
         for schema in [wrappedSchema, bareSchema] {
             let defs = try #require(schema["$defs"] as? [String: Any])
-            #expect(defs["book_trip__Traveler"] != nil)
+            #expect(defs["Traveler"] != nil)
+            let refs = collectRefs(in: schema)
+            #expect(refs.allSatisfy { defs[String($0.dropFirst("#/$defs/".count))] != nil })
         }
     }
 
@@ -307,6 +315,153 @@ struct ToolCallingSchemaTests {
     }
 
     // MARK: - Grammar Builder
+
+    @Test
+    func harmonyResponseGrammarConstrainsOnlyFinalPayload() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let schema =
+            #"{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"#
+        let grammar = try SchemaConverter.encodeHarmonyResponseGrammar(schemaJSON: schema)
+        let parsed = try parseAsDictionary(grammar)
+
+        #expect(parsed["type"] as? String == "structural_tag")
+        let format = try #require(parsed["format"] as? [String: Any])
+        #expect(format["type"] as? String == "or")
+        let alternatives = try #require(format["elements"] as? [[String: Any]])
+        #expect(alternatives.count == 2)
+
+        let sequence = alternatives[0]
+        #expect(sequence["type"] as? String == "sequence")
+        let elements = try #require(sequence["elements"] as? [[String: Any]])
+        #expect(elements.count == 3)
+        #expect(elements[0]["begin"] as? String == "<|channel|>analysis<|message|>")
+        #expect(elements[0]["end"] as? [String] == ["<|end|>"])
+        #expect(elements[1]["value"] as? String == "<|start|>assistant")
+        #expect(
+            elements[2]["begin"] as? String
+                == "<|channel|>final <|constrain|>json<|message|>")
+        #expect(elements[2]["end"] as? [String] == ["<|end|>", ""])
+
+        let tokenizer = try makeByteTokenizer()
+        _ = try GrammarConstraint(
+            tokenizer: tokenizer,
+            structuralTag: grammar,
+            fastForward: false)
+    }
+
+    @Test
+    func harmonyResponseFormatInstructionNamesTheConstrainedFormat() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let schema = #"{"type":"string"}"#
+        let instruction = try SchemaConverter.harmonyResponseFormatInstruction(
+            schemaJSON: schema)
+        #expect(instruction == "# Response Formats\n\n## json\n\n\(schema)")
+    }
+
+    @Test
+    func harmonyRequiredToolGrammarKeepsReasoningAndNativeCallFrames() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let weather = Transcript.ToolDefinition(
+            name: "get_weather",
+            description: "Get weather",
+            parameters: WeatherArgs.generationSchema)
+        let grammar = try SchemaConverter.encodeHarmonyToolCallingGrammar(
+            tools: [weather])
+        let parsed = try parseAsDictionary(grammar)
+        let format = try #require(parsed["format"] as? [String: Any])
+        #expect(format["type"] as? String == "or")
+        let branches = try #require(format["elements"] as? [[String: Any]])
+        #expect(branches.count == 2)
+
+        let reasoningSequence = branches[0]
+        let reasoningElements = try #require(
+            reasoningSequence["elements"] as? [[String: Any]])
+        #expect(reasoningElements[0]["begin"] as? String == "<|channel|>analysis<|message|>")
+        #expect(reasoningElements[0]["end"] as? String == "<|end|>")
+        #expect(reasoningElements[1]["value"] as? String == "<|start|>assistant")
+
+        let directChoice = branches[1]
+        let callTags = try #require(directChoice["elements"] as? [[String: Any]])
+        #expect(callTags.count == 1)
+        #expect(
+            callTags[0]["begin"] as? String
+                == "<|channel|>commentary to=functions.get_weather<|constrain|>json<|message|>")
+        #expect(callTags[0]["end"] as? String == "<|call|>")
+
+        let tokenizer = try makeByteTokenizer()
+        _ = try GrammarConstraint(
+            tokenizer: tokenizer,
+            structuralTag: grammar,
+            fastForward: false)
+    }
+
+    @Test
+    func harmonyResponseFormatAppendsToExistingDeveloperInstruction() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let messages = MLXLanguageModel.Executor.appendingDeveloperInstruction(
+            "# Response Formats",
+            to: [.system("Keep citations exact."), .user("Summarize")])
+        #expect(messages.count == 2)
+        #expect(messages[0].role == .system)
+        #expect(messages[0].content == "Keep citations exact.\n\n# Response Formats")
+        #expect(messages[1].content == "Summarize")
+    }
+
+    @Test
+    func harmonyResponseFormatInsertsDeveloperInstructionWhenMissing() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let messages = MLXLanguageModel.Executor.appendingDeveloperInstruction(
+            "# Response Formats",
+            to: [.user("Summarize")])
+        #expect(messages.count == 2)
+        #expect(messages[0].role == .system)
+        #expect(messages[0].content == "# Response Formats")
+        #expect(messages[1].role == .user)
+    }
+
+    @Test
+    func harmonyResponseFormatStartsOnlyAfterToolsAreConsumed() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        #expect(
+            !MLXLanguageModel.Executor.usesHarmonyResponseFormat(
+                schemaPresent: true,
+                toolsEnabled: true,
+                toolCallFormat: .gptOSS))
+        #expect(
+            MLXLanguageModel.Executor.usesHarmonyResponseFormat(
+                schemaPresent: true,
+                toolsEnabled: false,
+                toolCallFormat: .gptOSS))
+        #expect(
+            !MLXLanguageModel.Executor.usesHarmonyResponseFormat(
+                schemaPresent: false,
+                toolsEnabled: false,
+                toolCallFormat: .gptOSS))
+    }
+
+    @Test
+    func qwen3ResponseGrammarContinuesPrimedThinkingThenConstrainsJSON() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let schema = #"{"type":"string"}"#
+        let grammar = try SchemaConverter.encodeQwen3ResponseGrammar(
+            schemaJSON: schema,
+            primedInsideReasoning: true)
+        let parsed = try parseAsDictionary(grammar)
+        let format = try #require(parsed["format"] as? [String: Any])
+        #expect(format["type"] as? String == "sequence")
+        let elements = try #require(format["elements"] as? [[String: Any]])
+        #expect(elements.count == 3)
+        #expect(elements[0]["begin"] as? String == "")
+        #expect(elements[0]["end"] as? String == "</think>")
+        #expect(elements[1]["value"] as? String == "\n\n")
+        #expect(elements[2]["type"] as? String == "json_schema")
+
+        let tokenizer = try makeByteTokenizer()
+        _ = try GrammarConstraint(
+            tokenizer: tokenizer,
+            structuralTag: grammar,
+            fastForward: false)
+    }
 
     @Test
     func grammarBuilderRejectsEmptyToolList() {

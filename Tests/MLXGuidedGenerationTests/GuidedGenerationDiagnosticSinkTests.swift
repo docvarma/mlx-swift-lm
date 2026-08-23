@@ -23,6 +23,13 @@ struct GuidedGenerationDiagnosticSinkTests {
         #expect(sink.generatedTokenCount == 3)
         #expect(sink.finalBuffer == #"{"name":"x"}"#)
         #expect(sink.incompleteOutput == false)
+        #expect(
+            sink.buffers
+                == [
+                    GuidedGenerationDiagnosticBuffer(
+                        rawText: #"{"name":"x"}"#,
+                        incompleteOutput: false)
+                ])
         #expect(sink.parsedAsToolCall == true)
         #expect(sink.parsedName == "x")
     }
@@ -99,5 +106,17 @@ struct GuidedGenerationDiagnosticSinkTests {
 
         #expect(sink.errorDescriptions.count == 1)
         #expect(sink.errorDescriptions[0].contains("DiagnosticError"))
+    }
+
+    @Test
+    func retainsEveryBufferInOrder() {
+        let sink = GuidedGenerationDiagnosticSink()
+        sink.recordBuffer("first", incompleteOutput: false)
+        sink.recordBuffer("second", incompleteOutput: true)
+
+        #expect(sink.buffers.map(\.rawText) == ["first", "second"])
+        #expect(sink.buffers.map(\.incompleteOutput) == [false, true])
+        #expect(sink.finalBuffer == "second")
+        #expect(sink.incompleteOutput)
     }
 }
