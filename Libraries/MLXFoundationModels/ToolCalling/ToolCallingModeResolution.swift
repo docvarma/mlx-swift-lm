@@ -7,10 +7,6 @@ import FoundationModels
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 enum ToolCallingModeResolution {
-    enum Error: Swift.Error, Equatable {
-        case requiredToolsMissing
-    }
-
     static func resolve(
         _ mode: GenerationOptions.ToolCallingMode?
     ) -> GenerationOptions.ToolCallingMode {
@@ -41,9 +37,10 @@ enum ToolCallingModeResolution {
         if mode.kind == .disallowed {
             return []
         }
-        guard !definitions.isEmpty || responseSchemaPresent else {
-            throw Error.requiredToolsMissing
-        }
+        // A DynamicProfile may consume its final one-shot tool while the
+        // enclosing response still carries `.required`. An empty current
+        // surface means the session has reached its response-only round; it is
+        // not a provider configuration error.
         return definitions
     }
 }

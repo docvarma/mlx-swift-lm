@@ -37,12 +37,11 @@ struct ToolCallingModeResolutionTests {
         }
     }
 
-    @Test func requiredRejectsEmptyEnabledToolDefinitions() {
+    @Test func requiredAllowsResponseAfterDynamicToolsAreExhausted() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        #expect(throws: ToolCallingModeResolution.Error.requiredToolsMissing) {
-            _ = try ToolCallingModeResolution.enabledToolDefinitions(
-                for: .required, from: [])
-        }
+        let definitions = try ToolCallingModeResolution.enabledToolDefinitions(
+            for: .required, from: [])
+        #expect(definitions.isEmpty)
     }
 
     @Test func requiredAllowsSchemaAfterDynamicToolsAreExhausted() throws {
