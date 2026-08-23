@@ -111,6 +111,32 @@ final class ChatConventionsModelTests: XCTestCase {
         XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.tagged)
     }
 
+    func testGPTOSSDeclaresHarmonyReasoningAndToolFormat() throws {
+        let json = """
+            {
+                "model_type": "gpt_oss",
+                "num_hidden_layers": 1,
+                "num_local_experts": 2,
+                "num_experts_per_tok": 1,
+                "vocab_size": 64,
+                "rms_norm_eps": 1e-5,
+                "hidden_size": 16,
+                "intermediate_size": 16,
+                "head_dim": 8,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "sliding_window": 16,
+                "layer_types": ["full_attention"]
+            }
+            """
+        let config = try JSONDecoder().decode(
+            GPTOSSConfiguration.self, from: Data(json.utf8))
+        let model = GPTOSSModel(config)
+
+        XCTAssertEqual(model.toolCallFormat, .gptOSS)
+        XCTAssertEqual(model.reasoningConfig, .harmonyChannels)
+    }
+
     // MARK: Registry injection
 
     /// The factories take a `ChatConventionsRegistry` rather than reaching for
@@ -165,6 +191,14 @@ struct ChatConventionsTests {
         #expect(ReasoningConfig.alwaysOnThinking.promptStrategy == .alwaysOn)
         #expect(ReasoningConfig.alwaysOnThinking.startDelimiter == "<think>")
         #expect(ReasoningConfig.alwaysOnThinking.budgetTransition == nil)
+    }
+
+    @Test func harmonyChannelsPreset() {
+        let config = ReasoningConfig.harmonyChannels
+        #expect(config.startDelimiter == "<|channel|>analysis<|message|>")
+        #expect(config.endDelimiter == "<|end|>")
+        #expect(config.promptStrategy == .none)
+        #expect(config.isSpecialToken)
     }
 
     // MARK: - Declaration inheritance

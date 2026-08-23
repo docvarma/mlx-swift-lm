@@ -581,7 +581,9 @@ extension GPTOSSModel {
     /// or dispatched by this model integration.
     public var toolCallFormat: ToolCallFormat? { .gptOSS }
 
-    /// Harmony reasoning is channel-framed, not delimiter-scanned. Leave nil
-    /// so the `<think>` emitter is not applied to GPT-OSS.
-    public var reasoningConfig: ReasoningConfig? { nil }
+    /// Harmony reasoning is channel-framed, not `<think>`-delimited. Declaring
+    /// the protocol keeps FoundationModels capability admission and usage
+    /// routing truthful; `HarmonyStreamAdapter` remains the component that
+    /// parses and routes the actual frames.
+    public var reasoningConfig: ReasoningConfig? { .harmonyChannels }
 }

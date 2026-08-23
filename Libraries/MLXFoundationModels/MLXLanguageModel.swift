@@ -758,6 +758,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         static func emitUsage(
             input: LanguageModelExecutorGenerationChannel.Usage.Input,
             output: LanguageModelExecutorGenerationChannel.Usage.Output,
+            metadata: [String: any ConvertibleToGeneratedContent & Sendable] = [:],
             entryID: String?,
             into channel: LanguageModelExecutorGenerationChannel
         ) async {
@@ -765,7 +766,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             await channel.send(
                 .response(
                     entryID: entryID,
-                    action: .updateUsage(input: input, output: output)))
+                    action: .updateUsage(
+                        input: input,
+                        output: output,
+                        metadata: metadata)))
         }
 
         static func emitToolCall(
@@ -1460,6 +1464,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 output: .init(
                                     totalTokenCount: totalOutput,
                                     reasoningTokenCount: Swift.min(reasoningCount, totalOutput)),
+                                metadata: incomplete ? ["incompleteOutput": true] : [:],
                                 entryID: entryID, into: channel)
                         }
 
@@ -1716,6 +1721,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     reasoningTokenCount: min(
                         result.reasoningTokenCount,
                         info.generationTokenCount)),
+                metadata: (result.endedInsideReasoning
+                    || (result.responseText.isEmpty && result.toolCalls.isEmpty))
+                    ? ["incompleteOutput": true]
+                    : [:],
                 entryID: entryID,
                 into: channel)
         }
@@ -1813,6 +1822,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     output: .init(
                         totalTokenCount: generatedTokenCount,
                         reasoningTokenCount: 0),
+                    metadata: incomplete ? ["incompleteOutput": true] : [:],
                     entryID: entryID,
                     into: channel)
             }
@@ -1869,11 +1879,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     throw RejectedToolCallError(rejection)
                 }
             }
-            await Self.emitTextTerminalMetadata(
-                endedInsideReasoning: false,
-                emittedResponseText: emittedResponseText,
-                entryID: entryID,
-                into: channel)
             if let info = completionInfo {
                 // MLX-LM emits one .info event at end-of-generation with
                 // authoritative scalar token counts (`promptTokenCount`
@@ -1884,8 +1889,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     input: .init(totalTokenCount: info.promptTokenCount, cachedTokenCount: 0),
                     output: .init(
                         totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
+                    metadata: emittedResponseText ? [:] : ["incompleteOutput": true],
                     entryID: entryID, into: channel)
             }
+            await Self.emitTextTerminalMetadata(
+                endedInsideReasoning: false,
+                emittedResponseText: emittedResponseText,
+                entryID: entryID,
+                into: channel)
         }
 
         /// Dispatches the no-tools/no-schema path: reasoning routing when a
@@ -2083,12 +2094,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             // A turn is incomplete when generation stops inside private reasoning
             // or closes that frame without ever producing a public response.
-            await Self.emitTextTerminalMetadata(
-                endedInsideReasoning: endedInsideReasoning,
-                emittedResponseText: emittedResponseText,
-                entryID: responseEntryID,
-                into: channel)
-
             if let info = completionInfo {
                 // Single source of truth for usage: one authoritative
                 // `.updateUsage` (the framework's aggregator replaces wholesale,
@@ -2099,8 +2104,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     output: .init(
                         totalTokenCount: info.generationTokenCount,
                         reasoningTokenCount: min(reasoningTokenCount, info.generationTokenCount)),
+                    metadata: (endedInsideReasoning || !emittedResponseText)
+                        ? ["incompleteOutput": true]
+                        : [:],
                     entryID: responseEntryID, into: channel)
             }
+            await Self.emitTextTerminalMetadata(
+                endedInsideReasoning: endedInsideReasoning,
+                emittedResponseText: emittedResponseText,
+                entryID: responseEntryID,
+                into: channel)
         }
 
         /// Routes one scanned segment to the appropriate channel entry.
