@@ -993,7 +993,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 request.generationOptions.toolCallingMode)
             let enabledToolDefinitions = try ToolCallingModeResolution.enabledToolDefinitions(
                 for: toolCallingMode,
-                from: request.enabledToolDefinitions)
+                from: request.enabledToolDefinitions,
+                responseSchemaPresent: request.schema != nil)
 
             let container = try await model.loadContainer()
 

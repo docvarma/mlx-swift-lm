@@ -45,6 +45,15 @@ struct ToolCallingModeResolutionTests {
         }
     }
 
+    @Test func requiredAllowsSchemaAfterDynamicToolsAreExhausted() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let definitions = try ToolCallingModeResolution.enabledToolDefinitions(
+            for: .required,
+            from: [],
+            responseSchemaPresent: true)
+        #expect(definitions.isEmpty)
+    }
+
     @Test func disallowedDropsEvenManuallyEnabledDefinitions() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let definitions = try ToolCallingModeResolution.enabledToolDefinitions(

@@ -32,7 +32,8 @@ enum ToolCallingModeResolution {
 
     static func enabledToolDefinitions(
         for mode: GenerationOptions.ToolCallingMode,
-        from definitions: [Transcript.ToolDefinition]
+        from definitions: [Transcript.ToolDefinition],
+        responseSchemaPresent: Bool = false
     ) throws -> [Transcript.ToolDefinition] {
         if usesAllowedBehavior(mode) {
             return definitions
@@ -40,7 +41,9 @@ enum ToolCallingModeResolution {
         if mode.kind == .disallowed {
             return []
         }
-        guard !definitions.isEmpty else { throw Error.requiredToolsMissing }
+        guard !definitions.isEmpty || responseSchemaPresent else {
+            throw Error.requiredToolsMissing
+        }
         return definitions
     }
 }
