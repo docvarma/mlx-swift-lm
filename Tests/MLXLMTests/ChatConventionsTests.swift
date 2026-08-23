@@ -63,7 +63,7 @@ final class ChatConventionsModelTests: XCTestCase {
     /// Representative coverage only: this asserts the `model_type` -> class ->
     /// declaration path works end to end through the real type registry. It does
     /// not enumerate all ~25 migrated classes.
-    func testQwen3DeclaresReasoningAndNoToolFormat() async throws {
+    func testQwen3DeclaresReasoningAndJSONToolFormat() async throws {
         let json = """
             {
                 "model_type": "qwen3",
@@ -80,8 +80,7 @@ final class ChatConventionsModelTests: XCTestCase {
         let model = try await LLMTypeRegistry.shared.createModel(
             configuration: Data(json.utf8), modelType: "qwen3")
         XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.qwen3)
-        // Qwen3 (unlike Qwen3.5) declares no tool-call format.
-        XCTAssertNil(model.toolCallFormat)
+        XCTAssertEqual(model.toolCallFormat, .json)
     }
 
     func testQwen35DeclaresDualDialectToolFormat() throws {

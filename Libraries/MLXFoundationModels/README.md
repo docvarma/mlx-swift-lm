@@ -79,6 +79,30 @@ Declare what a model may do with the `capabilities:` list at construction. Decla
 | `.reasoning` | Run "thinking" models that emit a reasoning trace. |
 | `.vision` | Accept image inputs. |
 
+## Model-family protocols
+
+Tool syntax, reasoning framing, stop tokens, and structured-output decoding are
+provider concerns. Applications continue to use `LanguageModelSession`; they do
+not add family-specific prompt tags or parse model output.
+
+The public `ToolCallFormat` and `ReasoningConfig` types describe the built-in
+protocols. Model implementations select them through
+`ChatConventionsProviding`. Checkpoints whose protocol depends on repository
+identity can be mapped without changing the application by registering a public
+`ChatConventionsResolving` with `ChatConventionsRegistry`. A single
+`MLXLanguageModel` instance can also override the resolved configuration with a
+`ModelConfigurationResolver`.
+
+Built-in tool protocols cover JSON/Hermes, LFM2, Qwen XML and Qwen 3.5, GLM,
+Gemma and Gemma 4, Kimi K2, MiniMax, Muse Glimmer's Onyx/ATEM protocol,
+Mistral, Llama 3, and GPT-OSS Harmony. Required tool calls are constrained and
+decoded in the selected family's native syntax. Framed protocols fail before
+sampling when the tokenizer lacks their required control vocabulary; they are
+never reinterpreted as a different family.
+
+A checkpoint using a new wire protocol needs one new provider adapter. It must
+not be guessed from a model name or silently treated as generic JSON.
+
 ## Availability
 
 `MLXLanguageModel` exposes an `availability` property — `.available`, `.downloading`, `.unavailable(...)` — for gating on model and download state.

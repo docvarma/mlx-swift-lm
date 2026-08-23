@@ -22,7 +22,7 @@ enum ToolCallingModeResolution {
         case .required, .disallowed:
             return false
         @unknown default:
-            return true
+            return false
         }
     }
 
@@ -31,17 +31,24 @@ enum ToolCallingModeResolution {
         from definitions: [Transcript.ToolDefinition],
         responseSchemaPresent: Bool = false
     ) throws -> [Transcript.ToolDefinition] {
-        if usesAllowedBehavior(mode) {
+        switch mode.kind {
+        case .allowed:
             return definitions
-        }
-        if mode.kind == .disallowed {
+        case .disallowed:
             return []
+        case .required:
+            // A DynamicProfile may consume its final one-shot tool while the
+            // enclosing response still carries `.required`. An empty current
+            // surface means the session has reached its response-only round;
+            // it is not a provider configuration error.
+            return definitions
+        @unknown default:
+            throw LanguageModelError.unsupportedCapability(
+                LanguageModelError.UnsupportedCapability(
+                    capability: .toolCalling,
+                    debugDescription: "This tool-calling mode is not supported by the MLX provider."
+                ))
         }
-        // A DynamicProfile may consume its final one-shot tool while the
-        // enclosing response still carries `.required`. An empty current
-        // surface means the session has reached its response-only round; it is
-        // not a provider configuration error.
-        return definitions
     }
 }
 

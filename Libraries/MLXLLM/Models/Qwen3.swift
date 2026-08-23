@@ -283,5 +283,6 @@ extension Qwen3Model: LoRAModel {
 // MARK: - Chat conventions
 
 extension Qwen3Model {
+    public var toolCallFormat: ToolCallFormat? { .json }
     public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.qwen3 }
 }

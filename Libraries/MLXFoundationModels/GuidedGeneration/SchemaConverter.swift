@@ -6,6 +6,7 @@
 import Foundation
 import os
 import FoundationModels
+import MLXLMCommon
 
 /// Converts FoundationModels.GenerationSchema to a JSON string for xgrammar.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -172,6 +173,399 @@ enum SchemaConverter {
             throw SchemaConversionError.encodingFailed
         }
         logger.debug("Harmony tool structural-tag JSON (\(encoded.count) bytes)")
+        return result
+    }
+
+    /// Builds the required-tool grammar owned by a public MLX model-family
+    /// convention. Every supported ``ToolCallFormat`` stays in its native wire
+    /// protocol; the application never selects tags or argument syntax itself.
+    static func encodeRequiredToolCallingGrammar(
+        tools: [Transcript.ToolDefinition],
+        format: ToolCallFormat
+    ) throws -> String {
+        switch format {
+        case .json:
+            try encodeToolCallingGrammar(tools: tools)
+        case .gptOSS:
+            try encodeHarmonyToolCallingGrammar(tools: tools)
+        case .mistral:
+            try encodeJSONArgumentToolGrammar(
+                tools: tools,
+                begin: { "[TOOL_CALLS]\($0)[ARGS]" },
+                end: "")
+        case .llama3:
+            try encodeJSONArgumentToolGrammar(
+                tools: tools,
+                begin: { "<|python_tag|>{\"name\": \"\($0)\", \"parameters\": " },
+                end: "}")
+        case .kimiK2:
+            try encodeJSONArgumentToolGrammar(
+                tools: tools,
+                begin: {
+                    "<|tool_calls_section_begin|><|tool_call_begin|>functions.\($0):0<|tool_call_argument_begin|>"
+                },
+                end: "<|tool_call_end|><|tool_calls_section_end|>")
+        case .xmlFunction, .qwen35:
+            try encodeXMLParameterToolGrammar(
+                tools: tools,
+                begin: { "<tool_call><function=\($0)>" },
+                end: "</function></tool_call>")
+        case .glm4:
+            try encodeTaggedParameterToolGrammar(
+                tools: tools,
+                outerBegin: { "<tool_call>\n\($0)" },
+                outerEnd: "\n</tool_call>",
+                parameterBegin: { "<arg_key>\($0)</arg_key><arg_value>" },
+                parameterEnd: "</arg_value>")
+        case .atem:
+            try encodeATEMToolGrammar(tools: tools)
+        case .minimaxM2:
+            try encodeTaggedParameterToolGrammar(
+                tools: tools,
+                outerBegin: { "<minimax:tool_call><invoke name=\"\($0)\">" },
+                outerEnd: "</invoke></minimax:tool_call>",
+                parameterBegin: { "<parameter name=\"\($0)\">" },
+                parameterEnd: "</parameter>")
+        case .gemma:
+            try encodeGemmaToolGrammar(
+                tools: tools,
+                startTag: "<start_function_call>",
+                endTag: "<end_function_call>",
+                escapeMarker: "<escape>")
+        case .gemma4:
+            try encodeGemmaToolGrammar(
+                tools: tools,
+                startTag: "<|tool_call>",
+                endTag: "<tool_call|>",
+                escapeMarker: "<|\"|>")
+        case .lfm2:
+            try encodeLFMToolGrammar(tools: tools)
+        }
+    }
+
+    /// Native formats with a fixed function prefix followed by JSON arguments.
+    private static func encodeJSONArgumentToolGrammar(
+        tools: [Transcript.ToolDefinition],
+        begin: (String) -> String,
+        end: String
+    ) throws -> String {
+        try encodeStructuralToolChoice(
+            tools: tools,
+            makeTag: { tool, parameters in
+                [
+                    "type": "tag",
+                    "begin": begin(tool.name),
+                    "content": [
+                        "type": "json_schema",
+                        "json_schema": parameters,
+                    ],
+                    "end": end,
+                ]
+            })
+    }
+
+    /// Qwen/Qwen-derived XML functions use xgrammar's schema-aware public XML
+    /// parameter format rather than treating their parameter bodies as JSON.
+    private static func encodeXMLParameterToolGrammar(
+        tools: [Transcript.ToolDefinition],
+        begin: (String) -> String,
+        end: String
+    ) throws -> String {
+        try encodeStructuralToolChoice(
+            tools: tools,
+            makeTag: { tool, parameters in
+                [
+                    "type": "tag",
+                    "begin": begin(tool.name),
+                    "content": [
+                        "type": "qwen_xml_parameter",
+                        "json_schema": parameters,
+                    ],
+                    "end": end,
+                ]
+            })
+    }
+
+    /// Native XML-like formats whose parameter values are not JSON strings.
+    /// Each parameter remains schema-authorized by name and is parsed back
+    /// through the format's public `ToolCallParser` before execution.
+    private static func encodeTaggedParameterToolGrammar(
+        tools: [Transcript.ToolDefinition],
+        outerBegin: (String) -> String,
+        outerEnd: String,
+        parameterBegin: (String) -> String,
+        parameterEnd: String
+    ) throws -> String {
+        try encodeStructuralToolChoice(
+            tools: tools,
+            makeTag: { tool, parameters in
+                let parameterTags = nativeParameterElements(
+                    parameters: parameters,
+                    parameterBegin: parameterBegin,
+                    parameterEnd: parameterEnd)
+                return [
+                    "type": "tag",
+                    "begin": outerBegin(tool.name),
+                    "content": sequenceOrEmpty(parameterTags),
+                    "end": outerEnd,
+                ]
+            })
+    }
+
+    /// Muse Glimmer tool calls are ATEM payloads inside the Onyx response
+    /// protocol. The chat template primes the first generation after
+    /// `<|start|>assistant`; a generation following a private-reasoning frame
+    /// starts a fresh assistant frame. Accept precisely those two native entry
+    /// states and require the tool commit token in both.
+    private static func encodeATEMToolGrammar(
+        tools: [Transcript.ToolDefinition]
+    ) throws -> String {
+        try encodeStructuralToolChoices(
+            tools: tools,
+            makeTags: { tool, parameters in
+                let parameterTags = nativeParameterElements(
+                    parameters: parameters,
+                    parameterBegin: { "<atem:parameter name=\"\($0)\">" },
+                    parameterEnd: "</atem:parameter>")
+                let payloadBegin =
+                    "<atem:function_calls><atem:invoke name=\"\(tool.name)\">"
+                let payloadEnd = "</atem:invoke></atem:function_calls><|eot|>"
+                return [
+                    [
+                        "type": "tag",
+                        "begin": " to=\(tool.name)<|message|>\(payloadBegin)",
+                        "content": sequenceOrEmpty(parameterTags),
+                        "end": payloadEnd,
+                    ],
+                    [
+                        "type": "tag",
+                        "begin": "<|start|>assistant to=\(tool.name)<|message|>\(payloadBegin)",
+                        "content": sequenceOrEmpty(parameterTags),
+                        "end": payloadEnd,
+                    ],
+                ]
+            })
+    }
+
+    private static func encodeGemmaToolGrammar(
+        tools: [Transcript.ToolDefinition],
+        startTag: String,
+        endTag: String,
+        escapeMarker: String
+    ) throws -> String {
+        try encodeStructuralToolChoice(
+            tools: tools,
+            makeTag: { tool, parameters in
+                let required = requiredPropertyNames(in: parameters)
+                let properties = parameters["properties"] as? [String: Any] ?? [:]
+                let values: [[String: Any]] = required.enumerated().map { index, name in
+                    let separator = index == 0 ? "" : ","
+                    let schema = propertySchema(named: name, in: parameters, properties: properties)
+                    if isStringOnlySchema(schema) {
+                        return [
+                            "type": "tag",
+                            "begin": "\(separator)\(name):\(escapeMarker)",
+                            "content": [
+                                "type": "any_text"
+                            ],
+                            "end": escapeMarker,
+                        ]
+                    }
+                    return [
+                        "type": "tag",
+                        "begin": "\(separator)\(name):",
+                        "content": [
+                            "type": "json_schema",
+                            "json_schema": schema,
+                        ],
+                        "end": "",
+                    ]
+                }
+                return [
+                    "type": "tag",
+                    "begin": "\(startTag)call:\(tool.name){",
+                    "content": sequenceOrEmpty(values),
+                    "end": "}\(endTag)",
+                ]
+            })
+    }
+
+    private static func encodeLFMToolGrammar(
+        tools: [Transcript.ToolDefinition]
+    ) throws -> String {
+        try encodeStructuralToolChoice(
+            tools: tools,
+            makeTag: { tool, parameters in
+                let required = requiredPropertyNames(in: parameters)
+                let properties = parameters["properties"] as? [String: Any] ?? [:]
+                let values: [[String: Any]] = required.enumerated().map { index, name in
+                    let separator = index == 0 ? "" : ", "
+                    let schema = propertySchema(named: name, in: parameters, properties: properties)
+                    if isStringOnlySchema(schema) {
+                        return [
+                            "type": "tag",
+                            "begin": "\(separator)\(name)='",
+                            "content": [
+                                "type": "any_text"
+                            ],
+                            "end": "'",
+                        ]
+                    }
+                    return [
+                        "type": "tag",
+                        "begin": "\(separator)\(name)=",
+                        "content": [
+                            "type": "json_schema",
+                            "json_schema": schema,
+                        ],
+                        "end": "",
+                    ]
+                }
+                return [
+                    "type": "tag",
+                    "begin": "<|tool_call_start|>[\(tool.name)(",
+                    "content": sequenceOrEmpty(values),
+                    "end": ")]<|tool_call_end|>",
+                ]
+            })
+    }
+
+    private static func encodeStructuralToolChoice(
+        tools: [Transcript.ToolDefinition],
+        makeTag: (Transcript.ToolDefinition, [String: Any]) throws -> [String: Any]
+    ) throws -> String {
+        try encodeStructuralToolChoices(
+            tools: tools,
+            makeTags: { tool, parameters in [try makeTag(tool, parameters)] })
+    }
+
+    private static func encodeStructuralToolChoices(
+        tools: [Transcript.ToolDefinition],
+        makeTags: (Transcript.ToolDefinition, [String: Any]) throws -> [[String: Any]]
+    ) throws -> String {
+        guard !tools.isEmpty else { throw SchemaConversionError.noTools }
+        let encoder = JSONEncoder()
+        let tags = try tools.flatMap { tool in
+            let data = try encoder.encode(tool.parameters)
+            guard let parameters = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { throw SchemaConversionError.encodingFailed }
+            return try makeTags(tool, parameters)
+        }
+        let structuralTag: [String: Any] = [
+            "type": "structural_tag",
+            "format": [
+                "type": "or",
+                "elements": tags,
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: structuralTag)
+        guard let result = String(data: data, encoding: .utf8) else {
+            throw SchemaConversionError.encodingFailed
+        }
+        logger.debug(
+            "Native tool structural-tag JSON (\(data.count) bytes, \(tools.count) tools, \(tags.count) variants)"
+        )
+        return result
+    }
+
+    private static func sequenceOrEmpty(_ elements: [[String: Any]]) -> [String: Any] {
+        guard !elements.isEmpty else {
+            return ["type": "const_string", "value": ""]
+        }
+        return ["type": "sequence", "elements": elements]
+    }
+
+    private static func optional(_ element: [String: Any]) -> [String: Any] {
+        [
+            "type": "or",
+            "elements": [
+                element,
+                ["type": "const_string", "value": ""],
+            ],
+        ]
+    }
+
+    private static func nativeParameterElements(
+        parameters: [String: Any],
+        parameterBegin: (String) -> String,
+        parameterEnd: String
+    ) -> [[String: Any]] {
+        let required = Set(requiredPropertyNames(in: parameters))
+        let properties = parameters["properties"] as? [String: Any] ?? [:]
+        return properties.keys.sorted().map { name in
+            let schema = propertySchema(
+                named: name, in: parameters, properties: properties)
+            let content: [String: Any]
+            if isStringOnlySchema(schema) {
+                content = ["type": "any_text"]
+            } else {
+                content = ["type": "json_schema", "json_schema": schema]
+            }
+            let tag: [String: Any] = [
+                "type": "tag",
+                "begin": parameterBegin(name),
+                "content": content,
+                "end": parameterEnd,
+            ]
+            return required.contains(name) ? tag : optional(tag)
+        }
+    }
+
+    private static func requiredPropertyNames(in schema: [String: Any]) -> [String] {
+        (schema["required"] as? [String] ?? []).sorted()
+    }
+
+    private static func propertySchema(
+        named name: String,
+        in root: [String: Any],
+        properties: [String: Any]
+    ) -> [String: Any] {
+        var schema = properties[name] as? [String: Any] ?? [:]
+        if let definitions = root["$defs"] {
+            schema["$defs"] = definitions
+        }
+        return schema
+    }
+
+    private static func isStringOnlySchema(_ schema: [String: Any]) -> Bool {
+        if schema["type"] as? String == "string" { return true }
+        guard let types = schema["type"] as? [String] else { return false }
+        return Set(types).subtracting(["null"]) == ["string"]
+    }
+
+    /// Muse Glimmer structured responses are JSON payloads inside an Onyx
+    /// assistant-to-user frame. As with required tools, support both the
+    /// initially primed assistant header and a fresh frame following private
+    /// reasoning, and require the native `<|eot|>` commit.
+    static func encodeOnyxResponseGrammar(schemaJSON: String) throws -> String {
+        guard let data = schemaJSON.data(using: .utf8) else {
+            throw SchemaConversionError.encodingFailed
+        }
+        let schema = try JSONSerialization.jsonObject(
+            with: data, options: [.fragmentsAllowed])
+        let variants: [[String: Any]] = [
+            [
+                "type": "tag",
+                "begin": " to=user<|message|>",
+                "content": ["type": "json_schema", "json_schema": schema],
+                "end": "<|eot|>",
+            ],
+            [
+                "type": "tag",
+                "begin": "<|start|>assistant to=user<|message|>",
+                "content": ["type": "json_schema", "json_schema": schema],
+                "end": "<|eot|>",
+            ],
+        ]
+        let structuralTag: [String: Any] = [
+            "type": "structural_tag",
+            "format": ["type": "or", "elements": variants],
+        ]
+        let encoded = try JSONSerialization.data(withJSONObject: structuralTag)
+        guard let result = String(data: encoded, encoding: .utf8) else {
+            throw SchemaConversionError.encodingFailed
+        }
+        logger.debug("Onyx response structural-tag JSON (\(encoded.count) bytes)")
         return result
     }
 
