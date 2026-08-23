@@ -1522,7 +1522,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                         generatedTokenIDs = tokenIDs
                                         generatedTokenCount = tokenCount
                                         grammarTerminated = terminated
-                                    }
+                                    },
+                                    preserveStopToken: usesHarmonyToolGrammar
                                 ) { _ in
                                     GuidedGenerationDiagnosticSink.current?.recordEmit()
                                     return !Task.isCancelled
