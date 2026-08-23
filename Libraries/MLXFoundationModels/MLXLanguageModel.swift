@@ -1115,6 +1115,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         tokenizer: context.tokenizer)
                     let resolved = configurationResolver.resolve(
                         context.configuration, for: descriptor)
+                    let toolCallFormat = resolved.toolCallFormat ?? .json
 
                     // GPT-OSS learns the selected response format from the
                     // developer message; grammar masking alone does not tell it
@@ -1126,7 +1127,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         Self.usesHarmonyResponseFormat(
                             schemaPresent: true,
                             toolsEnabled: !enabledToolDefinitions.isEmpty,
-                            toolCallFormat: context.configuration.toolCallFormat)
+                            toolCallFormat: toolCallFormat)
                     {
                         let instruction =
                             try SchemaConverter
@@ -1314,6 +1315,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             let result = try await runAllowedToolGeneration(
                                 input: toolAwareInput,
                                 toolSpecs: toolSpecs,
+                                toolCallFormat: toolCallFormat,
                                 reasoning: reasoning,
                                 requestedMaxTokens: requestedMaxTokens,
                                 requestedTemperature: request.generationOptions.temperature,
@@ -1345,7 +1347,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     input: input,
                                     reasoningSetup: nil,
                                     reasoningEnabled: false,
-                                    toolCallFormat: context.configuration.toolCallFormat,
+                                    toolCallFormat: toolCallFormat,
                                     modelID: modelID,
                                     requestedMaxTokens: requestedMaxTokens,
                                     requestedTemperature: request.generationOptions.temperature,
@@ -1383,8 +1385,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 tools: toolSpecs,
                                 additionalContext: toolAwareContext))
 
-                        let usesHarmonyToolGrammar =
-                            context.configuration.toolCallFormat == .gptOSS
+                        let usesHarmonyToolGrammar = toolCallFormat == .gptOSS
                         let toolCallingGrammar: String
                         if usesHarmonyToolGrammar {
                             toolCallingGrammar =
@@ -1615,7 +1616,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             input: effectiveInput,
                             reasoningSetup: reasoningSetup,
                             reasoningEnabled: reasoningEnabledForSchema,
-                            toolCallFormat: context.configuration.toolCallFormat,
+                            toolCallFormat: toolCallFormat,
                             modelID: modelID,
                             requestedMaxTokens: requestedMaxTokens,
                             requestedTemperature: request.generationOptions.temperature,
@@ -1629,6 +1630,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         try await runTextGeneration(
                             reasoningSetup: reasoningSetup,
                             fallbackInput: effectiveInput,
+                            toolCallFormat: toolCallFormat,
                             requestedMaxTokens: requestedMaxTokens,
                             requestedTemperature: request.generationOptions.temperature,
                             samplingConfiguration: requestedSamplingConfiguration,
@@ -1673,6 +1675,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func runAllowedToolGeneration(
             input: LMInput,
             toolSpecs: [[String: any Sendable]],
+            toolCallFormat: ToolCallFormat,
             reasoning: (config: ReasoningConfig, primedInside: Bool)?,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
@@ -1687,12 +1690,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration)
             let reservedOutputTokenCount = requestedMaxTokens ?? Self.defaultMaxTokens
-            let format = context.configuration.toolCallFormat ?? .json
             var router = AllowedToolOutputRouter(
-                format: format,
+                format: toolCallFormat,
                 tools: toolSpecs,
                 reasoning: reasoning)
-            var protocolDecoder = format.makeProtocolTokenStreamDecoder(
+            var protocolDecoder = toolCallFormat.makeProtocolTokenStreamDecoder(
                 tokenizer: context.tokenizer,
                 tools: toolSpecs,
                 stopStrings: context.configuration.effectiveStopStrings)
@@ -2215,6 +2217,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func runTextGeneration(
             reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?,
             fallbackInput: LMInput,
+            toolCallFormat: ToolCallFormat,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
@@ -2229,6 +2232,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     input: reasoning.input,
                     reasoningConfig: reasoning.config,
                     primedInside: reasoning.primedInside,
+                    toolCallFormat: toolCallFormat,
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
                     samplingConfiguration: samplingConfiguration,
@@ -2261,6 +2265,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             input: LMInput,
             reasoningConfig: ReasoningConfig,
             primedInside: Bool,
+            toolCallFormat: ToolCallFormat,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
@@ -2279,8 +2284,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             var emitter = ReasoningEventEmitter(
                 config: reasoningConfig, primedInside: primedInside)
-            let format = context.configuration.toolCallFormat ?? .json
-            var protocolDecoder = format.makeProtocolTokenStreamDecoder(
+            var protocolDecoder = toolCallFormat.makeProtocolTokenStreamDecoder(
                 tokenizer: context.tokenizer,
                 tools: nil,
                 stopStrings: context.configuration.effectiveStopStrings)
