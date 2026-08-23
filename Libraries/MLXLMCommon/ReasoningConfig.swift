@@ -78,8 +78,7 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
 /// is toggled at prompt time.
 ///
 /// Rides on ``ModelConfiguration`` (and therefore ``ResolvedModelConfiguration``)
-/// so it reaches generation-time code via `ModelContext.configuration`, exactly
-/// like ``ToolCallFormat``.
+/// so model factories and provider bridges resolve it alongside ``ToolCallFormat``.
 public struct ReasoningConfig: Sendable, Equatable {
 
     /// The marker that opens a reasoning span (e.g. `<think>`).

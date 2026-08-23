@@ -87,6 +87,30 @@ struct ModelConfigurationResolverTests {
         #expect(patched.extraEOSTokens == baseline.extraEOSTokens)
     }
 
+    /// The Foundation Models bridge consumes this resolved value on every path
+    /// (allowed/required tools, schema generation, and reasoning). This pins the
+    /// public downstream seam used to select a full response protocol such as
+    /// GPT-OSS Harmony without adding application-specific model checks.
+    @Test func customResolverSelectsPublicModelProtocol() {
+        struct HarmonyResolver: ModelConfigurationResolver {
+            func resolve(
+                _ configuration: ModelConfiguration, for descriptor: ModelDescriptor
+            ) -> ModelConfiguration {
+                var configuration = configuration
+                configuration.toolCallFormat = .gptOSS
+                configuration.reasoningConfig = .harmonyChannels
+                return configuration
+            }
+        }
+
+        let resolved = HarmonyResolver().resolve(
+            sampleConfiguration(),
+            for: descriptor(modelType: "gpt_oss", modelId: "example/gpt-oss"))
+
+        #expect(resolved.toolCallFormat == .gptOSS)
+        #expect(resolved.reasoningConfig == .harmonyChannels)
+    }
+
 }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)
