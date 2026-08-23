@@ -127,17 +127,20 @@ private struct UsageForwardingLanguageModelExecutor: LanguageModelExecutor {
                 entryID: UUID().uuidString,
                 destination: .reasoning,
                 into: channel)
+        }
+        await MLXLanguageModel.Executor.emitUsage(
+            input: .init(totalTokenCount: 7, cachedTokenCount: 0),
+            output: .init(totalTokenCount: 3, reasoningTokenCount: 3),
+            metadata: configuration.emitsResponseText ? [:] : ["incompleteOutput": true],
+            entryID: responseEntryID,
+            into: channel)
+        if !configuration.emitsResponseText {
             await MLXLanguageModel.Executor.emitTextTerminalMetadata(
                 endedInsideReasoning: false,
                 emittedResponseText: false,
                 entryID: responseEntryID,
                 into: channel)
         }
-        await MLXLanguageModel.Executor.emitUsage(
-            input: .init(totalTokenCount: 7, cachedTokenCount: 0),
-            output: .init(totalTokenCount: 3, reasoningTokenCount: 3),
-            entryID: responseEntryID,
-            into: channel)
     }
 }
 
@@ -176,13 +179,18 @@ struct UsageForwardingTests {
 
         var finalInputTokenCount = 0
         var finalOutputTokenCount = 0
+        var finalIncompleteOutput = false
         for try await snapshot in session.streamResponse(to: "Report usage.") {
             finalInputTokenCount = snapshot.usage.input.totalTokenCount
             finalOutputTokenCount = snapshot.usage.output.totalTokenCount
+            if let value = snapshot.usage.metadata["incompleteOutput"] {
+                finalIncompleteOutput = (try? value.value(Bool.self)) == true
+            }
         }
 
         #expect(finalInputTokenCount == 7)
         #expect(finalOutputTokenCount == 3)
+        #expect(finalIncompleteOutput == !emitsResponseText)
     }
 }
 

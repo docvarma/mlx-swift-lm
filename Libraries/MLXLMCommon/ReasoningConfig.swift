@@ -143,4 +143,15 @@ public struct ReasoningConfig: Sendable, Equatable {
     public static let alwaysOnThinking = ReasoningConfig(
         startDelimiter: "<think>", endDelimiter: "</think>",
         promptStrategy: .alwaysOn)
+
+    /// GPT-OSS Harmony reasoning is carried in protocol frames rather than
+    /// `<think>` delimiters. The MLX FoundationModels adapter routes these
+    /// frames with `HarmonyStreamAdapter`; the markers here describe the
+    /// protocol for capability admission and for a safe typed rejection when
+    /// a caller attempts to disable an always-on reasoning model.
+    public static let harmonyChannels = ReasoningConfig(
+        startDelimiter: "<|channel|>analysis<|message|>",
+        endDelimiter: "<|end|>",
+        promptStrategy: .none,
+        isSpecialToken: true)
 }
