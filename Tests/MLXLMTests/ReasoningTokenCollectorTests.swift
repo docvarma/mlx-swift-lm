@@ -15,6 +15,10 @@ struct ReasoningTokenCollectorTests {
 
     private static let thinkConfig = ReasoningConfig(
         startDelimiter: "<think>", endDelimiter: "</think>", promptStrategy: .alwaysOn)
+    private static let thinkThenToolConfig = ReasoningConfig(
+        startDelimiter: "<think>", endDelimiter: "</think>",
+        promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
+        implicitEndDelimiters: ["<tool_call>"])
 
     /// Deterministic id→string tokenizer. `decode` concatenates the mapped
     /// strings with no separator, so callers control the decoded stream exactly.
@@ -45,21 +49,27 @@ struct ReasoningTokenCollectorTests {
         20: "<think></think>",  // empty block in a single token
         30: "a", 31: "b", 32: "c",
         40: "\nthought\n",  // template-style newlines
+        50: "<tool_call>",
+        51: "reason<tool_call>",
     ]
     private static let tok = MapTokenizer(map: vocab)
 
     /// Feeds tokens until the collector signals stop (mirroring Phase 1's break),
     /// else consumes all and finalizes. Returns routed segments, whether it
     /// stopped, and the accumulated token IDs.
-    private func drive(primedInside: Bool = false, _ tokens: [Int])
+    private func drive(
+        config: ReasoningConfig = Self.thinkConfig,
+        primedInside: Bool = false,
+        _ tokens: [Int]
+    ) throws
         -> (segments: [Segment], stopped: Bool, tokenIDs: [Int])
     {
         var collector = ReasoningTokenCollector(
-            config: Self.thinkConfig, primedInside: primedInside, tokenizer: Self.tok)
+            config: config, primedInside: primedInside, tokenizer: Self.tok)
         var segments: [Segment] = []
         var stopped = false
         for token in tokens {
-            segments += collector.ingest(token)
+            segments += try collector.ingest(token)
             if collector.shouldStopAfterReasoning {
                 stopped = true
                 break
@@ -90,8 +100,8 @@ struct ReasoningTokenCollectorTests {
     /// Non-primed (Qwen3-style): the opening `<think>` is generated, so it is
     /// captured; accumulation ends at the closing `</think>` token, and the
     /// answer tokens after it are never ingested.
-    @Test func nonPrimedCapturesOpeningThroughClose() {
-        let (segs, stopped, ids) = drive([1, 2, 3, 4, 5, 6])
+    @Test func nonPrimedCapturesOpeningThroughClose() throws {
+        let (segs, stopped, ids) = try drive([1, 2, 3, 4, 5, 6])
         #expect(stopped)
         #expect(ids == [1, 2, 3, 4])  // <think> reason ing </think> — no answer tokens
         #expect(reasoningText(segs) == "reasoning")
@@ -101,8 +111,8 @@ struct ReasoningTokenCollectorTests {
 
     /// Primed (R1-style): the opening `<think>` lives in the prompt, so the first
     /// generated token is already reasoning; IDs run from there through `</think>`.
-    @Test func primedAccumulatesFromFirstReasoningToken() {
-        let (segs, stopped, ids) = drive(primedInside: true, [2, 3, 4, 5, 6])
+    @Test func primedAccumulatesFromFirstReasoningToken() throws {
+        let (segs, stopped, ids) = try drive(primedInside: true, [2, 3, 4, 5, 6])
         #expect(stopped)
         #expect(ids == [2, 3, 4])
         #expect(reasoningText(segs) == "reasoning")
@@ -114,8 +124,8 @@ struct ReasoningTokenCollectorTests {
     /// Empty `<think></think>` resolving inside one decoded chunk: `isInsideReasoning`
     /// reads false before AND after, but `hasClosedReasoning` latches, so Phase 1
     /// correctly stops and hands off to the constrained phase.
-    @Test func emptyBlockInOneChunkStillStops() {
-        let (segs, stopped, ids) = drive([20, 5, 6])
+    @Test func emptyBlockInOneChunkStillStops() throws {
+        let (segs, stopped, ids) = try drive([20, 5, 6])
         #expect(stopped)
         #expect(ids == [20])
         #expect(reasoningText(segs).isEmpty)  // no reasoning content
@@ -126,8 +136,8 @@ struct ReasoningTokenCollectorTests {
 
     /// A `</think>` split across two tokens closes only once the full delimiter
     /// arrives — the collector stops on the second token, not the first.
-    @Test func splitClosingDelimiterStopsOnCompletion() {
-        let (segs, stopped, ids) = drive([1, 2, 12, 13, 5])
+    @Test func splitClosingDelimiterStopsOnCompletion() throws {
+        let (segs, stopped, ids) = try drive([1, 2, 12, 13, 5])
         #expect(stopped)
         #expect(ids == [1, 2, 12, 13])  // stopped on 13, not 12
         #expect(reasoningText(segs) == "reason")
@@ -136,8 +146,8 @@ struct ReasoningTokenCollectorTests {
 
     /// Never-opened (a reasoning-capable model that just answers): no close ever
     /// fires, so Phase 1 does not stop early (the caller bounds it by maxTokens).
-    @Test func neverOpenedDoesNotStop() {
-        let (segs, stopped, ids) = drive([5, 6])
+    @Test func neverOpenedDoesNotStop() throws {
+        let (segs, stopped, ids) = try drive([5, 6])
         #expect(!stopped)
         #expect(ids == [5, 6])
         #expect(reasoningText(segs).isEmpty)
@@ -146,8 +156,8 @@ struct ReasoningTokenCollectorTests {
 
     /// The stop latches on the FIRST close; a second `<think>…</think>` block is
     /// never reached because the caller has already broken to Phase 2.
-    @Test func stopsOnFirstCloseNotReopen() {
-        let (segs, stopped, ids) = drive([1, 30, 4, 31, 1, 32, 4])
+    @Test func stopsOnFirstCloseNotReopen() throws {
+        let (segs, stopped, ids) = try drive([1, 30, 4, 31, 1, 32, 4])
         #expect(stopped)
         #expect(ids == [1, 30, 4])  // stopped at first </think>; second block never ingested
         #expect(reasoningText(segs) == "a")
@@ -157,11 +167,36 @@ struct ReasoningTokenCollectorTests {
     /// Template-style newlines (`<think>\n…\n</think>`): the detokenizer's
     /// newline segmenting and the emitter's whitespace trimming compose without
     /// leaking markers; the close is still detected on the `</think>` token.
-    @Test func handlesTemplateNewlines() {
-        let (segs, stopped, ids) = drive([1, 40, 4, 5])
+    @Test func handlesTemplateNewlines() throws {
+        let (segs, stopped, ids) = try drive([1, 40, 4, 5])
         #expect(stopped)
         #expect(ids == [1, 40, 4])
         #expect(reasoningText(segs).contains("thought"))
         #expect(!leaksMarker(segs))
+    }
+
+    /// Qwen may leave reasoning by emitting the tool marker directly. Phase 1
+    /// must route only the thought and hand Phase 2 a prefix without that marker;
+    /// the native required-call grammar then owns the marker exactly once.
+    @Test func implicitToolBoundaryIsRemovedFromContinuation() throws {
+        let (segs, stopped, ids) = try drive(
+            config: Self.thinkThenToolConfig,
+            primedInside: true,
+            [2, 50])
+        #expect(stopped)
+        #expect(ids == [2])
+        #expect(reasoningText(segs) == "reason")
+        #expect(responseText(segs).isEmpty)
+    }
+
+    @Test func implicitToolBoundaryFailsClosedWhenItIsNotAnExactTokenSuffix() {
+        var collector = ReasoningTokenCollector(
+            config: Self.thinkThenToolConfig,
+            primedInside: true,
+            tokenizer: Self.tok)
+
+        #expect(
+            throws: ReasoningTokenCollectorError.unverifiedImplicitBoundary("<tool_call>"),
+            performing: { try collector.ingest(51) })
     }
 }

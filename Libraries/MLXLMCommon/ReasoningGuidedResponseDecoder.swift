@@ -30,7 +30,8 @@ package enum ReasoningGuidedResponseDecoder {
             tokenizer: tokenizer)
         var reasoning = ""
         for token in tokenIDs {
-            for segment in collector.ingest(token) {
+            guard let segments = try? collector.ingest(token) else { return nil }
+            for segment in segments {
                 if case .reasoning(let text) = segment { reasoning += text }
             }
             if collector.shouldStopAfterReasoning { break }
