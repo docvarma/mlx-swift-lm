@@ -85,6 +85,11 @@ public enum GuidedGenerationLoop {
     ///   - tokenCompletion: The same terminal callback with the authoritative
     ///     generated token IDs included for protocol-aware decoders. Optional;
     ///     ordinary text/schema callers can continue using `completion`.
+    ///   - preserveStopToken: When true, a grammar-allowed model stop token is
+    ///     committed to the matcher and retained in the terminal token stream.
+    ///     Full-protocol grammars use this for semantic terminators such as
+    ///     Harmony's `<|call|>`; plain JSON generation keeps the default and
+    ///     omits its sampler-owned EOS token from the response payload.
     ///   - emit: Callback for each text delta. Return `false` to stop.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
@@ -111,6 +116,7 @@ public enum GuidedGenerationLoop {
         prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
         completion: ((String, Int, Bool) -> Void)? = nil,
         tokenCompletion: ((String, [Int], Int, Bool) -> Void)? = nil,
+        preserveStopToken: Bool = false,
         emit: (String) -> Bool
     ) throws -> Int {
         let model = context.model
@@ -313,13 +319,35 @@ public enum GuidedGenerationLoop {
             // `applyMaskAndSample` set it to -inf, so argmax would not
             // have selected it.
             if mask.needsApply {
-                if tokenId == context.tokenizer.unknownTokenId || stopTokenIDs.contains(tokenId) {
+                if tokenId == context.tokenizer.unknownTokenId {
                     if diagnosticLog {
                         logger.info(
                             "[GuidedGen] Stop reason: EOS/unk tokenId=\(tokenId) at token \(tokenCount)"
                         )
                     }
                     grammarStopped = true
+                    break
+                }
+                if stopTokenIDs.contains(tokenId) {
+                    if preserveStopToken {
+                        let terminalCommit = try constraint.commitToken(Int32(token))
+                        diagnosticSink?.recordSampledToken(tokenId)
+                        generatedTokenIDs.append(tokenId)
+                        detokenizer.append(token: tokenId)
+                        if let text = detokenizer.next() {
+                            accumulatedText += text
+                            _ = emit(text)
+                        }
+                        tokenCount += 1
+                        grammarStopped = terminalCommit.isTerminated
+                    } else {
+                        grammarStopped = true
+                    }
+                    if diagnosticLog {
+                        logger.info(
+                            "[GuidedGen] Stop reason: EOS tokenId=\(tokenId) at token \(tokenCount), preserved=\(preserveStopToken)"
+                        )
+                    }
                     break
                 }
             }
