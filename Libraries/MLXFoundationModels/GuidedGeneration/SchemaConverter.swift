@@ -31,6 +31,196 @@ enum SchemaConverter {
         return jsonString
     }
 
+    /// Adds the named response format GPT-OSS expects in its developer
+    /// message. The same name appears in the Harmony final-frame
+    /// `<|constrain|>json` header enforced by ``encodeHarmonyResponseGrammar``.
+    static func harmonyResponseFormatInstruction(schemaJSON: String) throws -> String {
+        guard let data = schemaJSON.data(using: .utf8) else {
+            throw SchemaConversionError.encodingFailed
+        }
+        _ = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        return "# Response Formats\n\n## json\n\n\(schemaJSON)"
+    }
+
+    /// Builds the established one-pass GPT-OSS structured-output grammar:
+    /// optional unconstrained Harmony analysis, followed by a required final
+    /// frame whose payload alone is constrained to the response JSON schema.
+    ///
+    /// The model remains inside its trained Harmony protocol and xgrammar
+    /// governs the complete assistant turn; a bare JSON grammar at token zero
+    /// would incorrectly suppress the analysis/final channel headers.
+    static func encodeHarmonyResponseGrammar(schemaJSON: String) throws -> String {
+        guard let data = schemaJSON.data(using: .utf8) else {
+            throw SchemaConversionError.encodingFailed
+        }
+        let schema = try JSONSerialization.jsonObject(
+            with: data, options: [.fragmentsAllowed])
+
+        let final: [String: Any] = [
+            "type": "tag",
+            "begin": "<|channel|>final <|constrain|>json<|message|>",
+            "content": [
+                "type": "json_schema",
+                "json_schema": schema,
+            ],
+            // XGrammar owns schema completion; Harmony stop tokens remain
+            // sampler-owned and must not be required behind the JSON grammar.
+            "end": ["<|end|>", ""],
+        ]
+        let analysis: [String: Any] = [
+            "type": "tag",
+            "begin": "<|channel|>analysis<|message|>",
+            "content": [
+                "type": "any_text",
+                "excludes": [] as [String],
+            ],
+            "end": ["<|end|>"],
+        ]
+        let structuralTag: [String: Any] = [
+            "type": "structural_tag",
+            "format": [
+                "type": "or",
+                "elements": [
+                    [
+                        "type": "sequence",
+                        "elements": [
+                            analysis,
+                            [
+                                "type": "const_string",
+                                "value": "<|start|>assistant",
+                            ],
+                            final,
+                        ] as [Any],
+                    ],
+                    final,
+                ] as [Any],
+            ] as [String: Any],
+        ]
+
+        let encoded = try JSONSerialization.data(withJSONObject: structuralTag)
+        guard let result = String(data: encoded, encoding: .utf8) else {
+            throw SchemaConversionError.encodingFailed
+        }
+        logger.debug("Harmony response structural-tag JSON (\(encoded.count) bytes)")
+        return result
+    }
+
+    /// Builds a required, single-call Harmony grammar for GPT-OSS. The tool
+    /// recipient commits the selected function before xgrammar opens that
+    /// function's argument schema. Optional analysis remains unconstrained,
+    /// while the tool call stays in the model's native commentary channel.
+    static func encodeHarmonyToolCallingGrammar(
+        tools: [Transcript.ToolDefinition]
+    ) throws -> String {
+        guard !tools.isEmpty else {
+            throw SchemaConversionError.noTools
+        }
+
+        let encoder = JSONEncoder()
+        let toolTags: [[String: Any]] = try tools.map { tool in
+            let paramsData = try encoder.encode(tool.parameters)
+            let params = try JSONSerialization.jsonObject(with: paramsData)
+            let content: [String: Any] = [
+                "type": "json_schema",
+                "json_schema": params,
+            ]
+
+            return [
+                "type": "tag",
+                "begin":
+                    "<|channel|>commentary to=functions.\(tool.name)<|constrain|>json<|message|>",
+                "content": content,
+                "end": "<|call|>",
+            ]
+        }
+        let toolChoice: [String: Any] = [
+            "type": "or",
+            "elements": toolTags,
+        ]
+        let analysis: [String: Any] = [
+            "type": "tag",
+            "begin": "<|channel|>analysis<|message|>",
+            "content": [
+                "type": "any_text",
+                "excludes": [] as [String],
+            ],
+            "end": "<|end|>",
+        ]
+        let structuralTag: [String: Any] = [
+            "type": "structural_tag",
+            "format": [
+                "type": "or",
+                "elements": [
+                    [
+                        "type": "sequence",
+                        "elements": [
+                            analysis,
+                            [
+                                "type": "const_string",
+                                "value": "<|start|>assistant",
+                            ],
+                            toolChoice,
+                        ] as [Any],
+                    ],
+                    toolChoice,
+                ] as [Any],
+            ] as [String: Any],
+        ]
+
+        let encoded = try JSONSerialization.data(withJSONObject: structuralTag)
+        guard let result = String(data: encoded, encoding: .utf8) else {
+            throw SchemaConversionError.encodingFailed
+        }
+        logger.debug("Harmony tool structural-tag JSON (\(encoded.count) bytes)")
+        return result
+    }
+
+    /// Builds Qwen3's native thinking-to-schema sequence. Its chat template
+    /// normally primes the assistant inside `<think>`, so the reasoning tag has
+    /// an empty `begin`; callers may supply the explicit opening marker for a
+    /// non-primed compatible prompt.
+    static func encodeQwen3ResponseGrammar(
+        schemaJSON: String,
+        primedInsideReasoning: Bool
+    ) throws -> String {
+        guard let data = schemaJSON.data(using: .utf8) else {
+            throw SchemaConversionError.encodingFailed
+        }
+        let schema = try JSONSerialization.jsonObject(
+            with: data, options: [.fragmentsAllowed])
+        let structuralTag: [String: Any] = [
+            "type": "structural_tag",
+            "format": [
+                "type": "sequence",
+                "elements": [
+                    [
+                        "type": "tag",
+                        "begin": primedInsideReasoning ? "" : "<think>",
+                        "content": [
+                            "type": "any_text",
+                            "excludes": [] as [String],
+                        ],
+                        "end": "</think>",
+                    ],
+                    [
+                        "type": "const_string",
+                        "value": "\n\n",
+                    ],
+                    [
+                        "type": "json_schema",
+                        "json_schema": schema,
+                    ],
+                ] as [Any],
+            ] as [String: Any],
+        ]
+        let encoded = try JSONSerialization.data(withJSONObject: structuralTag)
+        guard let result = String(data: encoded, encoding: .utf8) else {
+            throw SchemaConversionError.encodingFailed
+        }
+        logger.debug("Qwen3 response structural-tag JSON (\(encoded.count) bytes)")
+        return result
+    }
+
     /// Builds the JSON Schema describing the tool-calling envelope itself:
     /// a `oneOf` over each supplied tool's `{name, arguments}` shape.
     ///

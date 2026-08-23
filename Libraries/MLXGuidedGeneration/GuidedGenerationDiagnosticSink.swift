@@ -2,6 +2,16 @@
 
 import Foundation
 
+public struct GuidedGenerationDiagnosticBuffer: Sendable, Equatable {
+    public let rawText: String
+    public let incompleteOutput: Bool
+
+    public init(rawText: String, incompleteOutput: Bool) {
+        self.rawText = rawText
+        self.incompleteOutput = incompleteOutput
+    }
+}
+
 /// Test-only diagnostic capture for the tool-call grammar/tokenizer boundary.
 ///
 /// Off by default: production never binds `current`, so every recording site is
@@ -32,6 +42,10 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
 
     /// The exact buffer handed to the tool-call parser.
     public private(set) var finalBuffer: String?
+
+    /// Every exact guided buffer produced while this sink is bound, in call
+    /// order. `finalBuffer` remains as a convenience for existing diagnostics.
+    public private(set) var buffers: [GuidedGenerationDiagnosticBuffer] = []
 
     /// True when generation hit the token budget before the grammar stopped.
     public private(set) var incompleteOutput = false
@@ -81,6 +95,10 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     public func recordBuffer(_ buffer: String, incompleteOutput: Bool) {
         self.finalBuffer = buffer
         self.incompleteOutput = incompleteOutput
+        buffers.append(
+            GuidedGenerationDiagnosticBuffer(
+                rawText: buffer,
+                incompleteOutput: incompleteOutput))
     }
 
     public func recordParse(parsedAsToolCall: Bool, parsedName: String?) {

@@ -82,6 +82,9 @@ public enum GuidedGenerationLoop {
     ///     token plus the terminal token count and grammar state. This runs
     ///     before an `incompleteOutput` error is thrown, so callers can retain
     ///     truthful usage and diagnostics for truncated generations.
+    ///   - tokenCompletion: The same terminal callback with the authoritative
+    ///     generated token IDs included for protocol-aware decoders. Optional;
+    ///     ordinary text/schema callers can continue using `completion`.
     ///   - emit: Callback for each text delta. Return `false` to stop.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
@@ -107,6 +110,7 @@ public enum GuidedGenerationLoop {
         diagnosticLog: Bool = false,
         prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
         completion: ((String, Int, Bool) -> Void)? = nil,
+        tokenCompletion: ((String, [Int], Int, Bool) -> Void)? = nil,
         emit: (String) -> Bool
     ) throws -> Int {
         let model = context.model
@@ -479,6 +483,15 @@ public enum GuidedGenerationLoop {
                 tokenIds: generatedTokenIDs,
                 skipSpecialTokens: false
             ),
+            tokenCount,
+            grammarStopped
+        )
+        tokenCompletion?(
+            context.tokenizer.decode(
+                tokenIds: generatedTokenIDs,
+                skipSpecialTokens: false
+            ),
+            generatedTokenIDs,
             tokenCount,
             grammarStopped
         )
