@@ -78,6 +78,10 @@ public enum GuidedGenerationLoop {
     ///   - prefill: Prompt prefill parameters (step size, chunking strategy,
     ///     progress callback). Defaults to a 512-token step with balanced
     ///     chunking.
+    ///   - completion: Receives the exact, one-shot decode of every generated
+    ///     token plus the terminal token count and grammar state. This runs
+    ///     before an `incompleteOutput` error is thrown, so callers can retain
+    ///     truthful usage and diagnostics for truncated generations.
     ///   - emit: Callback for each text delta. Return `false` to stop.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
@@ -102,6 +106,7 @@ public enum GuidedGenerationLoop {
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
         prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
+        completion: ((String, Int, Bool) -> Void)? = nil,
         emit: (String) -> Bool
     ) throws -> Int {
         let model = context.model
@@ -151,6 +156,8 @@ public enum GuidedGenerationLoop {
 
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
         var tokenCount = 0
+        var generatedTokenIDs: [Int] = []
+        generatedTokenIDs.reserveCapacity(maxTokens)
         var grammarStopped = false
         var whitespaceTracker = WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIDs)
 
@@ -317,6 +324,7 @@ public enum GuidedGenerationLoop {
             let commitResult = try constraint.commitToken(Int32(token))
 
             diagnosticSink?.recordSampledToken(tokenId)
+            generatedTokenIDs.append(tokenId)
             // Yield the sampled token
             detokenizer.append(token: tokenId)
             if let text = detokenizer.next() {
@@ -367,6 +375,7 @@ public enum GuidedGenerationLoop {
                         break
                     }
                     diagnosticSink?.recordFastForwardToken(Int(ffToken))
+                    generatedTokenIDs.append(Int(ffToken))
                     detokenizer.append(token: Int(ffToken))
                     if let text = detokenizer.next() {
                         accumulatedText += text
@@ -459,6 +468,20 @@ public enum GuidedGenerationLoop {
 
         diagnosticSink?.recordTermination(
             grammarTerminated: grammarStopped, generatedTokenCount: tokenCount)
+
+        // Tokenizer.decode is not guaranteed to be append-only. Byte-level BPE
+        // and SentencePiece tokenizers can rewrite whitespace or punctuation
+        // at an append boundary, so concatenating streaming deltas is not a
+        // lossless representation of structured output. The terminal decode
+        // from the exact token sequence is authoritative.
+        completion?(
+            context.tokenizer.decode(
+                tokenIds: generatedTokenIDs,
+                skipSpecialTokens: false
+            ),
+            tokenCount,
+            grammarStopped
+        )
 
         // If we exhausted maxTokens without the grammar reaching a stop state,
         // the output is structurally incomplete (e.g., truncated JSON).

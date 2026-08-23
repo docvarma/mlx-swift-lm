@@ -62,15 +62,26 @@ struct MaxTokenTruncationTests {
             let input = try await context.processor.prepare(input: userInput)
 
             // 5 tokens is far too few to complete a multi-property JSON object.
+            var completedText: String?
+            var completedTokenCount: Int?
+            var grammarTerminated: Bool?
             #expect(throws: GuidedGenerationError.incompleteOutput) {
                 try GuidedGenerationLoop.run(
                     input: input,
                     context: context,
                     constraint: constraint,
                     maxTokens: 5,
-                    vocabSize: Int(xgTokenizer.vocabSize)
+                    vocabSize: Int(xgTokenizer.vocabSize),
+                    completion: { text, tokenCount, terminated in
+                        completedText = text
+                        completedTokenCount = tokenCount
+                        grammarTerminated = terminated
+                    }
                 ) { _ in true }
             }
+            #expect(completedText != nil)
+            #expect(completedTokenCount == 5)
+            #expect(grammarTerminated == false)
         }
     }
 

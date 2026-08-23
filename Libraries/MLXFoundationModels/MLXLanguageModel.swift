@@ -1434,7 +1434,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         var incomplete = false
                         var generatedTokenCount: Int?
                         do {
-                            generatedTokenCount = try await MLXRequestAdmission.perform(
+                            _ = try await MLXRequestAdmission.perform(
                                 metrics: Self.metrics(
                                     for: phase2Input,
                                     reservedOutputTokenCount: phase2MaxTokens,
@@ -1451,9 +1451,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     hardReserve: hardReserve,
                                     closingBias: closingBias,
                                     whitespaceBias: whitespaceBias,
-                                    whitespaceTokenIDs: whitespaceTokenIDs
-                                ) { text in
-                                    outputBuffer += text
+                                    whitespaceTokenIDs: whitespaceTokenIDs,
+                                    completion: { text, tokenCount, _ in
+                                        outputBuffer = text
+                                        generatedTokenCount = tokenCount
+                                    }
+                                ) { _ in
                                     GuidedGenerationDiagnosticSink.current?.recordEmit()
                                     return !Task.isCancelled
                                 }
@@ -1786,7 +1789,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var incomplete = false
             var generatedTokenCount: Int?
             do {
-                generatedTokenCount = try await MLXRequestAdmission.perform(
+                _ = try await MLXRequestAdmission.perform(
                     metrics: Self.metrics(
                         for: input,
                         reservedOutputTokenCount: maxTokens,
@@ -1803,9 +1806,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         hardReserve: hardReserve,
                         closingBias: bias.closing,
                         whitespaceBias: bias.whitespace,
-                        whitespaceTokenIDs: bias.whitespaceTokenIDs
-                    ) { text in
-                        outputBuffer += text
+                        whitespaceTokenIDs: bias.whitespaceTokenIDs,
+                        completion: { text, tokenCount, _ in
+                            outputBuffer = text
+                            generatedTokenCount = tokenCount
+                        }
+                    ) { _ in
                         GuidedGenerationDiagnosticSink.current?.recordEmit()
                         return !Task.isCancelled
                     }
