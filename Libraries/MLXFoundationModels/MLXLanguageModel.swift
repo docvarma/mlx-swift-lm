@@ -224,7 +224,7 @@ private actor ModelCache {
         hostTokenizer: any Tokenizer,
         fastForward: Bool
     ) throws -> GrammarConstraint {
-        let cacheKey = "\(modelID):\(kind):\(source)"
+        let cacheKey = "\(modelID):\(kind):fastForward=\(fastForward):\(source)"
         if let template = constraintTemplates[cacheKey] {
             do {
                 return try template.clone()
@@ -838,6 +838,30 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             return Float(max(0, value))
         }
 
+        /// Partitions a guided request into a normal generation region, a
+        /// soft-close region, and a smaller hard-close tail. Neither close
+        /// region may consume more than half of the caller's total budget;
+        /// otherwise a large schema reserve can force completion from token
+        /// zero and prevent the model from producing semantic content.
+        static func guidedCompletionReserves(
+            structuralReserve: Int,
+            maxTokens: Int
+        ) -> (soft: Int, hard: Int) {
+            guard maxTokens > 0 else { return (0, 0) }
+            let halfBudget = Swift.max(1, maxTokens / 2)
+            let quarterBudget = Swift.max(1, maxTokens / 4)
+            let eighthBudget = Swift.max(1, maxTokens / 8)
+            let soft = Swift.min(
+                halfBudget,
+                Swift.max(structuralReserve * 3, quarterBudget)
+            )
+            let hard = Swift.min(
+                soft,
+                Swift.max(structuralReserve * 2, eighthBudget)
+            )
+            return (soft, hard)
+        }
+
         /// Translate Foundation Models' `GenerationOptions.SamplingMode` into one
         /// backend-local value that preserves both the sampling strategy and optional
         /// `UInt64` seed. No mode set (`nil`) and any future/unknown `Kind` both map to
@@ -1353,7 +1377,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             source: toolCallingGrammar,
                             tokenizer: xgTokenizer,
                             hostTokenizer: context.tokenizer,
-                            fastForward: true
+                            fastForward: false
                         )
 
                         // Always partition into zones -- the grammar has
@@ -1373,9 +1397,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             schemaJSON: toolCallingEnvelopeJSON,
                             tokenizer: context.tokenizer
                         )
-                        let completionReserve = Swift.max(
-                            structuralReserve * 3, maxTokens / 4)
-                        let hardReserve = structuralReserve * 8
+                        let reserves = Self.guidedCompletionReserves(
+                            structuralReserve: structuralReserve,
+                            maxTokens: maxTokens
+                        )
 
                         let whitespaceBias = bias.whitespace
                         let whitespaceTokenIDs = bias.whitespaceTokenIDs
@@ -1447,8 +1472,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     constraint: constraint,
                                     maxTokens: phase2MaxTokens,
                                     vocabSize: Int(xgTokenizer.vocabSize),
-                                    completionReserve: completionReserve,
-                                    hardReserve: hardReserve,
+                                    completionReserve: reserves.soft,
+                                    hardReserve: reserves.hard,
                                     closingBias: closingBias,
                                     whitespaceBias: whitespaceBias,
                                     whitespaceTokenIDs: whitespaceTokenIDs,
@@ -1773,7 +1798,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 source: schemaJSON,
                 tokenizer: xgTokenizer,
                 hostTokenizer: context.tokenizer,
-                fastForward: true)
+                fastForward: false)
             let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
             let bias = await MLXLanguageModel.makeTokenizerBias(
                 modelID: modelID,
@@ -1781,8 +1806,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let structuralReserve = CompletionReserve.estimate(
                 schemaJSON: schemaJSON,
                 tokenizer: context.tokenizer)
-            let completionReserve = Swift.max(structuralReserve * 3, maxTokens / 4)
-            let hardReserve = structuralReserve * 8
+            let reserves = Self.guidedCompletionReserves(
+                structuralReserve: structuralReserve,
+                maxTokens: maxTokens
+            )
 
             var outputBuffer = ""
 
@@ -1802,8 +1829,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         constraint: constraint,
                         maxTokens: maxTokens,
                         vocabSize: Int(xgTokenizer.vocabSize),
-                        completionReserve: completionReserve,
-                        hardReserve: hardReserve,
+                        completionReserve: reserves.soft,
+                        hardReserve: reserves.hard,
                         closingBias: bias.closing,
                         whitespaceBias: bias.whitespace,
                         whitespaceTokenIDs: bias.whitespaceTokenIDs,
