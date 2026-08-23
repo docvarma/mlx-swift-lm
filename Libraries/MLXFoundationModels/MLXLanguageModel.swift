@@ -718,6 +718,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
+        /// Delivers schema-guided JSON only after the grammar has completed it.
+        ///
+        /// FoundationModels parses every response append against the generation
+        /// schema. XGrammar can legally choose a property order that differs
+        /// from FoundationModels' `x-order`, making an otherwise completable
+        /// token prefix look permanently invalid to the framework. Sending the
+        /// completed document as one append preserves the provider contract for
+        /// every valid JSON-schema property order.
+        static func emitCompletedSchemaText(
+            _ text: String,
+            entryID: String,
+            into channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            await emit(
+                text: text,
+                entryID: entryID,
+                destination: .response,
+                into: channel
+            )
+        }
+
         static func emitMetadata(
             _ values: [String: any ConvertibleToGeneratedContent & Sendable], entryID: String?,
             into channel: LanguageModelExecutorGenerationChannel
@@ -1760,17 +1781,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let completionReserve = Swift.max(structuralReserve * 3, maxTokens / 4)
             let hardReserve = structuralReserve * 8
 
-            let (textStream, textContinuation) = AsyncStream<String>.makeStream()
             var outputBuffer = ""
-            async let forwarder: Void = {
-                for await text in textStream {
-                    await Self.emit(
-                        text: text,
-                        entryID: entryID,
-                        destination: .response,
-                        into: channel)
-                }
-            }()
 
             var incomplete = false
             var generatedTokenCount: Int?
@@ -1795,7 +1806,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         whitespaceTokenIDs: bias.whitespaceTokenIDs
                     ) { text in
                         outputBuffer += text
-                        textContinuation.yield(text)
                         GuidedGenerationDiagnosticSink.current?.recordEmit()
                         return !Task.isCancelled
                     }
@@ -1811,12 +1821,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } catch {
                 cancellationError = error
             }
-            textContinuation.finish()
-            await forwarder
             GuidedGenerationDiagnosticSink.current?.recordBuffer(
                 outputBuffer, incompleteOutput: incomplete)
             if let cancellationError {
                 throw cancellationError
+            }
+
+            if incomplete {
+                await Self.establishEmptyResponseEntry(
+                    entryID: entryID,
+                    into: channel
+                )
+            } else {
+                await Self.emitCompletedSchemaText(
+                    outputBuffer,
+                    entryID: entryID,
+                    into: channel
+                )
             }
 
             if let generatedTokenCount {

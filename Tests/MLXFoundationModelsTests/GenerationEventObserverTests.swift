@@ -81,6 +81,27 @@ struct GenerationEventObserverTests {
         #expect(arguments == "{\"a\":1}")
     }
 
+    @Test("schema output is delivered as one complete response event")
+    func buffersSchemaOutput() async {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let json = #"{"schemaVersion":1,"claims":[],"kind":"note-draft@1.0.0"}"#
+        let events = await capture { channel in
+            await MLXLanguageModel.Executor.emitCompletedSchemaText(
+                json,
+                entryID: "schema-entry",
+                into: channel
+            )
+        }
+        let textEvents = events.compactMap { event -> String? in
+            guard case .appendText(let text, "schema-entry", .response) = event else {
+                return nil
+            }
+            return text
+        }
+        #expect(textEvents == [json])
+    }
+
     @Test("no observer attached means no crash and events are simply sent")
     func noObserverIsSafe() async {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
