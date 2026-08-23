@@ -726,6 +726,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             await channel.send(.response(entryID: entryID, action: .updateMetadata(values)))
         }
 
+        static func establishEmptyResponseEntry(
+            entryID: String,
+            into channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            generationObserver?(
+                .appendText("", entryID: entryID, destination: .response))
+            await channel.send(
+                .response(
+                    entryID: entryID,
+                    action: .appendText("", tokenCount: 0)))
+        }
+
         static func emitUsage(
             input: LanguageModelExecutorGenerationChannel.Usage.Input,
             output: LanguageModelExecutorGenerationChannel.Usage.Output,
@@ -1923,6 +1935,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 stopStrings: context.configuration.effectiveStopStrings)
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
             var reasoningTokenCount = 0
+            var emittedResponseText = false
             var completionInfo: GenerateCompletionInfo?
             let (stream, task) = try await MLXRequestAdmission.perform(
                 metrics: Self.metrics(
@@ -1964,9 +1977,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             }
                             protocolDecoder = decoder
                             for segment in segments {
-                                await Self.send(
-                                    segment, responseEntryID: responseEntryID,
-                                    reasoningEntryID: reasoningEntryID, channel: channel)
+                                emittedResponseText =
+                                    await Self.send(
+                                        segment, responseEntryID: responseEntryID,
+                                        reasoningEntryID: reasoningEntryID, channel: channel)
+                                    || emittedResponseText
                             }
                             if !decoderContinues || !shouldContinue {
                                 task.cancel()
@@ -1983,9 +1998,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             detokenizer.append(token: token)
                             if let chunk = detokenizer.next() {
                                 for segment in emitter.process(chunk) {
-                                    await Self.send(
-                                        segment, responseEntryID: responseEntryID,
-                                        reasoningEntryID: reasoningEntryID, channel: channel)
+                                    emittedResponseText =
+                                        await Self.send(
+                                            segment, responseEntryID: responseEntryID,
+                                            reasoningEntryID: reasoningEntryID, channel: channel)
+                                        || emittedResponseText
                                 }
                             }
                         }
@@ -2017,16 +2034,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     return true
                 }
                 for segment in segments {
-                    await Self.send(
-                        segment, responseEntryID: responseEntryID,
-                        reasoningEntryID: reasoningEntryID, channel: channel)
+                    emittedResponseText =
+                        await Self.send(
+                            segment, responseEntryID: responseEntryID,
+                            reasoningEntryID: reasoningEntryID, channel: channel)
+                        || emittedResponseText
                 }
                 protocolDecoder = decoder
             } else {
                 for segment in emitter.finalize() {
-                    await Self.send(
-                        segment, responseEntryID: responseEntryID,
-                        reasoningEntryID: reasoningEntryID, channel: channel)
+                    emittedResponseText =
+                        await Self.send(
+                            segment, responseEntryID: responseEntryID,
+                            reasoningEntryID: reasoningEntryID, channel: channel)
+                        || emittedResponseText
                 }
                 endedInsideReasoning = emitter.isInsideReasoning
             }
@@ -2037,6 +2058,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // empty or partial answer for the model's chosen response — mirrors
             // the guided path's `incompleteOutput` convention.
             if endedInsideReasoning {
+                if !emittedResponseText {
+                    // FoundationModels retains response-scoped metadata and usage only
+                    // after an entry has been established. This zero-content marker
+                    // preserves the true incomplete turn without inventing answer text.
+                    await Self.establishEmptyResponseEntry(
+                        entryID: responseEntryID, into: channel)
+                }
                 await Self.emitMetadata(
                     ["incompleteOutput": true], entryID: responseEntryID, into: channel)
             }
@@ -2056,19 +2084,22 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         /// Routes one scanned segment to the appropriate channel entry.
+        @discardableResult
         private static func send(
             _ segment: ReasoningEventEmitter.Segment,
             responseEntryID: String,
             reasoningEntryID: String,
             channel: LanguageModelExecutorGenerationChannel
-        ) async {
+        ) async -> Bool {
             switch segment {
             case .reasoning(let text):
                 await Self.emit(
                     text: text, entryID: reasoningEntryID, destination: .reasoning, into: channel)
+                return false
             case .response(let text):
                 await Self.emit(
                     text: text, entryID: responseEntryID, destination: .response, into: channel)
+                return !text.isEmpty
             }
         }
 
