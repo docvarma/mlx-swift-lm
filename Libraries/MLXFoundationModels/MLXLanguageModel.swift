@@ -1264,15 +1264,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // models are tool-blind (template ignores `tools:`), so
                         // they fall through to the single-phase path unchanged;
                         // thinking-disabled requests stay single-phase too.
-                        let thinkThenCallConfig: ReasoningConfig? = {
-                            guard declaresReasoning,
-                                let cfg = resolved.reasoningConfig,
-                                case .templateFlag = cfg.promptStrategy,
-                                Self.thinkingEnabled(
-                                    for: request.contextOptions.reasoningLevel) != false
-                            else { return nil }
-                            return cfg
-                        }()
+                        let thinkThenCallConfig = Self.toolReasoningConfig(
+                            declared: declaresReasoning,
+                            config: resolved.reasoningConfig,
+                            format: toolCallFormat,
+                            thinkingEnabled: Self.thinkingEnabled(
+                                for: request.contextOptions.reasoningLevel))
                         // Thread `enable_thinking` through the tool-aware template
                         // so the prompt's thinking state matches how we drive
                         // generation. For a toggleable model (`.templateFlag`, e.g.
@@ -2657,6 +2654,29 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
+        /// Selects model-family reasoning that must complete before a required
+        /// tool-call grammar begins. Toggleable template families use their
+        /// declared flag. Muse Glimmer's Onyx protocol has no prompt flag but
+        /// requires its private `to=self` frame before the ATEM call frame.
+        /// Other always-on or flagless families remain single-phase until they
+        /// publish an equally specific, validated continuation contract.
+        static func toolReasoningConfig(
+            declared: Bool,
+            config: ReasoningConfig?,
+            format: ToolCallFormat?,
+            thinkingEnabled: Bool?
+        ) -> ReasoningConfig? {
+            guard declared, thinkingEnabled != false, let config else { return nil }
+            switch config.promptStrategy {
+            case .templateFlag:
+                return config
+            case .none where format == .atem:
+                return config
+            case .none, .alwaysOn:
+                return nil
+            }
+        }
+
         /// Decodes the rendered prompt's tail and asks whether it ends inside an
         /// open reasoning block (some model families prefill the opening
         /// delimiter).
@@ -2741,7 +2761,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 for await generation in stream {
                     try Task.checkCancellation()
                     guard case .token(let token) = generation else { continue }
-                    for segment in collector.ingest(token) {
+                    for segment in try collector.ingest(token) {
                         await Self.send(
                             segment, responseEntryID: responseEntryID,
                             reasoningEntryID: reasoningEntryID, channel: channel)

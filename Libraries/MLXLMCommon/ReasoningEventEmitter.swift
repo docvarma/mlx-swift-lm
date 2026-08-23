@@ -57,6 +57,12 @@ public struct ReasoningEventEmitter: Sendable {
     /// before and after and the transient open is invisible.
     public private(set) var hasClosedReasoning: Bool = false
 
+    /// The exact delimiter that most recently closed reasoning. Callers that
+    /// split generation into phases use this to distinguish a canonical close
+    /// (which remains in the continuation) from an implicit tool boundary
+    /// (which the constrained phase must regenerate exactly once).
+    public private(set) var lastClosedReasoningDelimiter: String?
+
     public init(config: ReasoningConfig, primedInside: Bool) {
         self.startDelimiter = config.startDelimiter
         self.endDelimiter = config.endDelimiter
@@ -127,6 +133,7 @@ public struct ReasoningEventEmitter: Sendable {
 
                 if inside {
                     hasClosedReasoning = true
+                    lastClosedReasoningDelimiter = match.delimiter
                     inside = false
                     if match.delimiter == endDelimiter {
                         // Canonical delimiters are framing and do not belong to

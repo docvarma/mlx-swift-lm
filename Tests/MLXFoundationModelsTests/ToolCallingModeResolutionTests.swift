@@ -3,6 +3,7 @@
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 import FoundationModels
+import MLXLMCommon
 import Testing
 @testable import MLXFoundationModels
 
@@ -68,6 +69,29 @@ struct ToolCallingModeResolutionTests {
         #expect(definitions.map(\.name) == ["first", "second"])
         #expect(!ToolCallingModeResolution.usesAllowedBehavior(.required))
         #expect(!ToolCallingModeResolution.usesAllowedBehavior(.disallowed))
+    }
+
+    @Test func toolReasoningSelectionIsFamilySpecific() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let qwen = ReasoningConfig(
+            startDelimiter: "<think>", endDelimiter: "</think>",
+            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true))
+        let onyx = ReasoningConfig(
+            startDelimiter: "to=self<|message|>", endDelimiter: "<|eom|>",
+            promptStrategy: .none)
+
+        #expect(
+            MLXLanguageModel.Executor.toolReasoningConfig(
+                declared: true, config: qwen, format: .json, thinkingEnabled: true) == qwen)
+        #expect(
+            MLXLanguageModel.Executor.toolReasoningConfig(
+                declared: true, config: onyx, format: .atem, thinkingEnabled: true) == onyx)
+        #expect(
+            MLXLanguageModel.Executor.toolReasoningConfig(
+                declared: true, config: onyx, format: .json, thinkingEnabled: true) == nil)
+        #expect(
+            MLXLanguageModel.Executor.toolReasoningConfig(
+                declared: true, config: onyx, format: .atem, thinkingEnabled: false) == nil)
     }
 }
 
