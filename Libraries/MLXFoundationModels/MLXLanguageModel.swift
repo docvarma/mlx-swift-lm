@@ -1507,6 +1507,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } catch {
                 // Synchronize GPU before rethrowing to ensure in-flight operations complete
                 Stream.gpu.synchronize()
+                GuidedGenerationDiagnosticSink.current?.recordError(error)
                 // Re-map xgrammar errors to typed `LanguageModelError` cases
                 // where the cause is provably user input (see `mapGrammarError`).
                 // Internal-shim failures pass through unchanged.

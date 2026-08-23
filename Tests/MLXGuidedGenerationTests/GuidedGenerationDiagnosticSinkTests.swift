@@ -89,4 +89,15 @@ struct GuidedGenerationDiagnosticSinkTests {
         #expect(sink.toolReasoningCloseCount == 1)
         #expect(!wasCancelled)
     }
+
+    @Test
+    func recordsProviderErrors() {
+        struct DiagnosticError: Error {}
+
+        let sink = GuidedGenerationDiagnosticSink()
+        sink.recordError(DiagnosticError())
+
+        #expect(sink.errorDescriptions.count == 1)
+        #expect(sink.errorDescriptions[0].contains("DiagnosticError"))
+    }
 }
