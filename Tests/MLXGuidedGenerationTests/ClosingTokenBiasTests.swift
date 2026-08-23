@@ -39,8 +39,8 @@ private struct ListTokenizer: MLXLMCommon.Tokenizer {
 @Suite
 struct ClosingTokenBiasTests {
 
-    @Test("Tier-2 closing characters get +100 bias")
-    func tier2CharactersGetHundredBias() {
+    @Test("Structural closes outrank numeric fill tokens")
+    func structuralClosesOutrankNumericFillTokens() {
         let tok = ListTokenizer(tokens: [
             "\"",  // 0
             "}",  // 1
@@ -53,41 +53,41 @@ struct ClosingTokenBiasTests {
         let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: nil)
         let values = bias.asArray(Float.self)
 
-        #expect(values[0] == 100.0)  // "
-        #expect(values[1] == 100.0)  // }
-        #expect(values[2] == 100.0)  // ]
+        #expect(values[0] == 200.0)  // "
+        #expect(values[1] == 200.0)  // }
+        #expect(values[2] == 200.0)  // ]
         #expect(values[3] == 100.0)  // 0
         #expect(values[4] == 100.0)  // 5
         #expect(values[5] == 100.0)  // 9
         #expect(values[6] == 0.0)  // abc
     }
 
-    @Test("EOS token gets +200 bias overriding any tier-2 setting")
-    func eosTokenGetsTwoHundredBiasOverridingTier2() {
+    @Test("EOS token gets +300 bias overriding structural closes")
+    func eosTokenGetsThreeHundredBiasOverridingStructuralClose() {
         let tok = ListTokenizer(tokens: [
-            "}",  // 0 - tier 2
+            "}",  // 0 - structural close
             "<EOS>",  // 1 - EOS
             "abc",  // 2 - none
         ])
         let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 1)
         let values = bias.asArray(Float.self)
 
-        #expect(values[0] == 100.0)  // tier 2 only
-        #expect(values[1] == 200.0)  // EOS
+        #expect(values[0] == 200.0)  // structural close only
+        #expect(values[1] == 300.0)  // EOS
         #expect(values[2] == 0.0)
     }
 
-    @Test("EOS that overlaps with a tier-2 character takes the +200 bias")
-    func eosOverlapsTier2() {
+    @Test("EOS that overlaps with a structural close takes the +300 bias")
+    func eosOverlapsStructuralClose() {
         let tok = ListTokenizer(tokens: [
-            "\"",  // 0 - tier 2 AND EOS
+            "\"",  // 0 - structural close AND EOS
             "abc",  // 1
         ])
         let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 0)
         let values = bias.asArray(Float.self)
 
-        // EOS bias overrides tier-2
-        #expect(values[0] == 200.0)
+        // EOS bias overrides the structural-close bias.
+        #expect(values[0] == 300.0)
         #expect(values[1] == 0.0)
     }
 
@@ -122,6 +122,6 @@ struct ClosingTokenBiasTests {
         let values = bias.asArray(Float.self)
 
         #expect(values[0] == 0.0)
-        #expect(values[1] == 100.0)  // tier 2 still applies
+        #expect(values[1] == 200.0)  // structural-close bias still applies
     }
 }

@@ -9,11 +9,12 @@ public enum ClosingTokenBias {
 
     // MARK: - Constants
 
-    private static let tier1Bias: Float = 200.0
-    private static let tier2Bias: Float = 100.0
+    private static let stopBias: Float = 300.0
+    private static let structuralCloseBias: Float = 200.0
+    private static let numericCloseBias: Float = 100.0
 
-    private static let tier2Characters: Set<String> = [
-        "\"", "}", "]",
+    private static let structuralCloseCharacters: Set<String> = ["\"", "}", "]"]
+    private static let numericCloseCharacters: Set<String> = [
         "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
     ]
 
@@ -22,8 +23,14 @@ public enum ClosingTokenBias {
     /// Returns an MLXArray of shape [vocabSize]. Closing tokens get a large
     /// positive value (tiered by priority), all others get 0.0.
     ///
-    /// Tier 1 (+200): EOS token
-    /// Tier 2 (+100): `"`, `}`, `]`, single digits `0`-`9`
+    /// Stop (+300): EOS token
+    /// Structural close (+200): `"`, `}`, `]`
+    /// Numeric close (+100): single digits `0`-`9`
+    ///
+    /// Structural closes outrank digits so a model inside a bounded JSON
+    /// string closes the string instead of filling the remaining budget with
+    /// numeric text. Digits remain biased when the grammar masks structural
+    /// tokens out for an integer value.
     public static func compute(tokenizer: any Tokenizer, eosTokenId: Int?) -> MLXArray {
         // Discover vocab size by scanning token IDs
         var vocabSize = 0
@@ -35,16 +42,18 @@ public enum ClosingTokenBias {
         var biases = [Float](repeating: 0.0, count: vocabSize)
 
         for id in 0 ..< vocabSize {
-            if let token = tokenizer.convertIdToToken(id),
-                tier2Characters.contains(token)
-            {
-                biases[id] = tier2Bias
+            if let token = tokenizer.convertIdToToken(id) {
+                if structuralCloseCharacters.contains(token) {
+                    biases[id] = structuralCloseBias
+                } else if numericCloseCharacters.contains(token) {
+                    biases[id] = numericCloseBias
+                }
             }
         }
 
-        // Tier 1 applied last so it overrides tier 2 if EOS overlaps
+        // Stop bias applied last so it overrides any ordinary token class.
         if let eos = eosTokenId, eos >= 0, eos < vocabSize {
-            biases[eos] = tier1Bias
+            biases[eos] = stopBias
         }
 
         return MLXArray(biases)

@@ -123,6 +123,47 @@ struct TemperaturePlumbingTests {
     }
 }
 
+// MARK: - Guided completion budgeting
+
+@Suite("Guided completion budgeting")
+struct GuidedCompletionBudgetingTests {
+
+    @Test("Large structural estimates cannot consume the full response budget")
+    func largeStructuralEstimateIsBounded() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let reserves = MLXLanguageModel.Executor.guidedCompletionReserves(
+            structuralReserve: 100,
+            maxTokens: 512
+        )
+
+        #expect(reserves.soft == 256)
+        #expect(reserves.hard == 200)
+    }
+
+    @Test("Small structural estimates retain proportional closing regions")
+    func smallStructuralEstimateUsesBudgetFloors() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let reserves = MLXLanguageModel.Executor.guidedCompletionReserves(
+            structuralReserve: 10,
+            maxTokens: 512
+        )
+
+        #expect(reserves.soft == 128)
+        #expect(reserves.hard == 64)
+    }
+
+    @Test("Nonpositive token budgets disable completion regions")
+    func nonpositiveBudgetDisablesCompletionRegions() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        #expect(
+            MLXLanguageModel.Executor.guidedCompletionReserves(
+                structuralReserve: 100,
+                maxTokens: 0
+            ) == (soft: 0, hard: 0)
+        )
+    }
+}
+
 // MARK: - Typed error mapping
 
 /// Pure-function tests for the `GrammarError → Error` translation in
