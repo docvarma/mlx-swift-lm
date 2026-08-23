@@ -127,11 +127,9 @@ private struct UsageForwardingLanguageModelExecutor: LanguageModelExecutor {
                 entryID: UUID().uuidString,
                 destination: .reasoning,
                 into: channel)
-            await MLXLanguageModel.Executor.establishEmptyResponseEntry(
-                entryID: responseEntryID,
-                into: channel)
-            await MLXLanguageModel.Executor.emitMetadata(
-                ["incompleteOutput": true],
+            await MLXLanguageModel.Executor.emitReasoningTerminalMetadata(
+                endedInsideReasoning: false,
+                emittedResponseText: false,
                 entryID: responseEntryID,
                 into: channel)
         }
