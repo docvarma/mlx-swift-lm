@@ -1760,6 +1760,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let hardReserve = structuralReserve * 8
 
             let (textStream, textContinuation) = AsyncStream<String>.makeStream()
+            var outputBuffer = ""
             async let forwarder: Void = {
                 for await text in textStream {
                     await Self.emit(
@@ -1792,6 +1793,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         whitespaceBias: bias.whitespace,
                         whitespaceTokenIDs: bias.whitespaceTokenIDs
                     ) { text in
+                        outputBuffer += text
                         textContinuation.yield(text)
                         GuidedGenerationDiagnosticSink.current?.recordEmit()
                         return !Task.isCancelled
@@ -1810,6 +1812,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
             textContinuation.finish()
             await forwarder
+            GuidedGenerationDiagnosticSink.current?.recordBuffer(
+                outputBuffer, incompleteOutput: incomplete)
             if let cancellationError {
                 throw cancellationError
             }
