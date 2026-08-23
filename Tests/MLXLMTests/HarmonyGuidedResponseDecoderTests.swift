@@ -61,18 +61,20 @@ struct HarmonyGuidedResponseDecoderTests {
 
     @Test("Decodes a required Harmony tool call after analysis")
     func requiredToolCall() throws {
-        let pieces = [
+        let bufferedPieces = [
             "<|channel|>", "analysis", "<|message|>", "inspect", "<|end|>",
             "<|start|>", "assistant",
             "<|channel|>", "commentary to=functions.read_source ",
             "<|constrain|>", "json", "<|message|>",
-            #"{"sourceID":"source-1"}"#, "<|call|>",
+            #"{"sourceID":"source-1"}"#,
         ]
-        let tokenizer = GuidedResponseTokenizer(tokens: pieces + guidedControlTokens)
-        let tokenIDs = try pieces.map { try #require(tokenizer.convertTokenToId($0)) }
+        let tokenizer = GuidedResponseTokenizer(tokens: bufferedPieces + guidedControlTokens)
+        let tokenIDs = try bufferedPieces.map { try #require(tokenizer.convertTokenToId($0)) }
+        let callTokenID = try #require(tokenizer.convertTokenToId("<|call|>"))
         let call = try #require(
             HarmonyGuidedResponseDecoder.decodeToolCall(
                 tokenIDs: tokenIDs,
+                sampledStopTokenID: callTokenID,
                 grammarTerminated: true,
                 allowedToolNames: ["read_source"],
                 tokenizer: tokenizer))
@@ -81,6 +83,21 @@ struct HarmonyGuidedResponseDecoderTests {
         #expect(call.reasoningTokenCount == 1)
         #expect(call.name == "read_source")
         #expect(call.argumentsText == #"{"sourceID":"source-1"}"#)
+
+        #expect(
+            HarmonyGuidedResponseDecoder.decodeToolCall(
+                tokenIDs: tokenIDs,
+                sampledStopTokenID: nil,
+                grammarTerminated: true,
+                allowedToolNames: ["read_source"],
+                tokenizer: tokenizer) == nil)
+        #expect(
+            HarmonyGuidedResponseDecoder.decodeToolCall(
+                tokenIDs: tokenIDs,
+                sampledStopTokenID: tokenizer.convertTokenToId("<|return|>"),
+                grammarTerminated: true,
+                allowedToolNames: ["read_source"],
+                tokenizer: tokenizer) == nil)
     }
 
     @Test("Rejects undeclared or incomplete Harmony tool calls")

@@ -24,6 +24,7 @@ package struct HarmonyGuidedToolCall: Sendable, Equatable {
 package enum HarmonyGuidedResponseDecoder {
     package static func decode(
         tokenIDs: [Int],
+        sampledStopTokenID: Int? = nil,
         grammarTerminated: Bool,
         tokenizer: any Tokenizer
     ) -> HarmonyGuidedResponse? {
@@ -68,6 +69,33 @@ package enum HarmonyGuidedResponseDecoder {
                 }
             }
         }
+        if let sampledStopTokenID {
+            for step in parser.push(sampledStopTokenID) {
+                switch step {
+                case .payload(let header, let payloadToken):
+                    if header.channel == .analysis {
+                        reasoningTokenIDs.append(payloadToken)
+                    } else if header.channel == .final {
+                        responseTokenIDs.append(payloadToken)
+                    }
+                case .closed(let frame):
+                    switch frame.header.channel {
+                    case .analysis:
+                        if frame.terminator != .end { sawInvalidTerminator = true }
+                    case .final:
+                        if frame.terminator == .return || frame.terminator == .end {
+                            sawFinalCompletion = true
+                        } else {
+                            sawInvalidTerminator = true
+                        }
+                    case .commentary, .other:
+                        sawInvalidTerminator = true
+                    }
+                case .consumed:
+                    break
+                }
+            }
+        }
         for step in parser.finish() {
             guard case .closed(let frame) = step else { continue }
             if frame.header.channel == .final, frame.terminator == .incomplete {
@@ -92,6 +120,7 @@ package enum HarmonyGuidedResponseDecoder {
 
     package static func decodeToolCall(
         tokenIDs: [Int],
+        sampledStopTokenID: Int? = nil,
         grammarTerminated: Bool,
         allowedToolNames: Set<String>,
         tokenizer: any Tokenizer
@@ -142,6 +171,11 @@ package enum HarmonyGuidedResponseDecoder {
                 {
                     reasoningTokenIDs.append(payloadToken)
                 }
+                inspect(step)
+            }
+        }
+        if let sampledStopTokenID {
+            for step in parser.push(sampledStopTokenID) {
                 inspect(step)
             }
         }
