@@ -43,6 +43,23 @@ private struct ToolCallTemperatureArgs {
 struct UpdateUsageEmissionTests {
 
     @Test
+    func usage_reachesFoundationModelsConsumer() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(TestFixtures.defaultModelID)
+        let session = LanguageModelSession(model: model, tools: [], instructions: nil)
+
+        var finalInputTokenCount = 0
+        var finalOutputTokenCount = 0
+        for try await snapshot in session.streamResponse(to: "Say 'hi' briefly.") {
+            finalInputTokenCount = snapshot.usage.input.totalTokenCount
+            finalOutputTokenCount = snapshot.usage.output.totalTokenCount
+        }
+
+        #expect(finalInputTokenCount > 0, "FoundationModels should receive prompt usage")
+        #expect(finalOutputTokenCount > 0, "FoundationModels should receive completion usage")
+    }
+
+    @Test
     func usage_emittedOnUnconstrainedPath() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(TestFixtures.defaultModelID)
