@@ -49,6 +49,9 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// Number of required-tool reasoning close boundaries observed.
     public private(set) var toolReasoningCloseCount = 0
 
+    /// Provider errors observed while the diagnostic sink is bound.
+    public private(set) var errorDescriptions: [String] = []
+
     private let cancelAfterEmitCount: Int?
     private let cancelOnToolReasoningClose: Bool
 
@@ -102,5 +105,10 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
         if cancelOnToolReasoningClose {
             withUnsafeCurrentTask { $0?.cancel() }
         }
+    }
+
+    /// Retains the concrete provider error before the framework maps it.
+    public func recordError(_ error: any Error) {
+        errorDescriptions.append(String(reflecting: error))
     }
 }
