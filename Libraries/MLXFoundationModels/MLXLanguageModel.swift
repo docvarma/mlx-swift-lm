@@ -1495,6 +1495,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
                         var outputBuffer = ""
                         var generatedTokenIDs: [Int] = []
+                        var sampledStopTokenID: Int?
                         var grammarTerminated = false
                         var incomplete = false
                         var generatedTokenCount: Int?
@@ -1517,13 +1518,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     closingBias: closingBias,
                                     whitespaceBias: whitespaceBias,
                                     whitespaceTokenIDs: whitespaceTokenIDs,
-                                    tokenCompletion: { text, tokenIDs, tokenCount, terminated in
+                                    tokenCompletion: {
+                                        text, tokenIDs, tokenCount, terminated, stopTokenID in
                                         outputBuffer = text
                                         generatedTokenIDs = tokenIDs
                                         generatedTokenCount = tokenCount
                                         grammarTerminated = terminated
-                                    },
-                                    preserveStopToken: usesHarmonyToolGrammar
+                                        sampledStopTokenID = stopTokenID
+                                    }
                                 ) { _ in
                                     GuidedGenerationDiagnosticSink.current?.recordEmit()
                                     return !Task.isCancelled
@@ -1539,6 +1541,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             let allowedNames = Set(requiredToolDefinitions.map(\.name))
                             if let call = HarmonyGuidedResponseDecoder.decodeToolCall(
                                 tokenIDs: generatedTokenIDs,
+                                sampledStopTokenID: sampledStopTokenID,
                                 grammarTerminated: grammarTerminated,
                                 allowedToolNames: allowedNames,
                                 tokenizer: context.tokenizer),
@@ -1575,8 +1578,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             incomplete = !emitted
                         }
 
+                        let diagnosticTokenIDs =
+                            generatedTokenIDs
+                            + (sampledStopTokenID.map { [$0] } ?? [])
+                        let diagnosticBuffer = context.tokenizer.decode(
+                            tokenIds: diagnosticTokenIDs,
+                            skipSpecialTokens: false)
                         GuidedGenerationDiagnosticSink.current?.recordBuffer(
-                            outputBuffer, incompleteOutput: incomplete)
+                            diagnosticBuffer, incompleteOutput: incomplete)
 
                         if let generatedTokenCount {
                             // Output total spans both phases (reasoning + envelope);
@@ -1998,6 +2007,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             var outputBuffer = ""
             var generatedTokenIDs: [Int] = []
+            var sampledStopTokenID: Int?
             var grammarTerminated = false
             var incomplete = false
             var generatedTokenCount: Int?
@@ -2020,11 +2030,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         closingBias: bias.closing,
                         whitespaceBias: bias.whitespace,
                         whitespaceTokenIDs: bias.whitespaceTokenIDs,
-                        tokenCompletion: { text, tokenIDs, tokenCount, terminated in
+                        tokenCompletion: {
+                            text, tokenIDs, tokenCount, terminated, stopTokenID in
                             outputBuffer = text
                             generatedTokenIDs = tokenIDs
                             generatedTokenCount = tokenCount
                             grammarTerminated = terminated
+                            sampledStopTokenID = stopTokenID
                         }
                     ) { _ in
                         GuidedGenerationDiagnosticSink.current?.recordEmit()
@@ -2050,6 +2062,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if !incomplete, usesHarmonyGrammar {
                 if let decoded = HarmonyGuidedResponseDecoder.decode(
                     tokenIDs: generatedTokenIDs,
+                    sampledStopTokenID: sampledStopTokenID,
                     grammarTerminated: grammarTerminated,
                     tokenizer: context.tokenizer)
                 {
@@ -2088,8 +2101,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
             }
 
+            let diagnosticTokenIDs =
+                generatedTokenIDs
+                + (sampledStopTokenID.map { [$0] } ?? [])
+            let diagnosticBuffer = context.tokenizer.decode(
+                tokenIds: diagnosticTokenIDs,
+                skipSpecialTokens: false)
             GuidedGenerationDiagnosticSink.current?.recordBuffer(
-                outputBuffer, incompleteOutput: incomplete)
+                diagnosticBuffer, incompleteOutput: incomplete)
 
             if incomplete {
                 await Self.establishEmptyResponseEntry(
