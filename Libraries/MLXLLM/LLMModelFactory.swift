@@ -69,6 +69,9 @@ public enum LLMTypeRegistry {
         "qwen3_next": create(Qwen3NextConfiguration.self, Qwen3NextModel.init),
         "qwen3_5": create(Qwen35Configuration.self, Qwen35Model.init),
         "qwen3_5_moe": create(Qwen35Configuration.self, Qwen35MoEModel.init),
+        // Qwen3.8 MoE reports `qwen3_5_moe_text` with a flat (no `text_config`)
+        // config; `Qwen35Configuration` decodes both layouts.
+        "qwen3_5_moe_text": create(Qwen35Configuration.self, Qwen35MoEModel.init),
         "qwen3_5_text": create(Qwen35TextConfiguration.self, Qwen35TextModel.init),
         "nanbeige": create(NanbeigeConfiguration.self, NanbeigeModel.init),
         "minicpm": create(MiniCPMConfiguration.self, MiniCPMModel.init),

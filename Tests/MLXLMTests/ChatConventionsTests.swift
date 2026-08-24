@@ -110,6 +110,39 @@ final class ChatConventionsModelTests: XCTestCase {
         XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.tagged)
     }
 
+    /// Qwen3.8 MoE reports `model_type: "qwen3_5_moe_text"` with a flat config
+    /// (no nested `text_config`). The registry must map it onto `Qwen35MoEModel`,
+    /// which inherits the Qwen3.5 conventions from `Qwen35Model`.
+    func testQwen35MoETextResolvesThroughTypeRegistry() async throws {
+        let json = """
+            {
+                "model_type": "qwen3_5_moe_text",
+                "hidden_size": 16,
+                "num_hidden_layers": 2,
+                "intermediate_size": 32,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 8,
+                "linear_num_value_heads": 2,
+                "linear_num_key_heads": 1,
+                "linear_key_head_dim": 8,
+                "linear_value_head_dim": 8,
+                "linear_conv_kernel_dim": 4,
+                "vocab_size": 32,
+                "full_attention_interval": 2,
+                "num_experts": 4,
+                "num_experts_per_tok": 2,
+                "moe_intermediate_size": 16,
+                "shared_expert_intermediate_size": 16
+            }
+            """
+        let model = try await LLMTypeRegistry.shared.createModel(
+            configuration: Data(json.utf8), modelType: "qwen3_5_moe_text")
+        XCTAssertTrue(model is Qwen35MoEModel)
+        XCTAssertEqual(model.toolCallFormat, .qwen35)
+        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.tagged)
+    }
+
     func testGPTOSSDeclaresHarmonyReasoningAndToolFormat() throws {
         let json = """
             {
