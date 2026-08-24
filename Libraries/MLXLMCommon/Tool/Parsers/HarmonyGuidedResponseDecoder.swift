@@ -24,7 +24,7 @@ package struct HarmonyGuidedToolCall: Sendable, Equatable {
 package enum HarmonyGuidedResponseDecoder {
     package static func decode(
         tokenIDs: [Int],
-        sampledStopTokenID: Int? = nil,
+        sampledStopTokenID _: Int? = nil,
         grammarTerminated: Bool,
         tokenizer: any Tokenizer
     ) -> HarmonyGuidedResponse? {
@@ -69,38 +69,13 @@ package enum HarmonyGuidedResponseDecoder {
                 }
             }
         }
-        if let sampledStopTokenID {
-            for step in parser.push(sampledStopTokenID) {
-                switch step {
-                case .payload(let header, let payloadToken):
-                    if header.channel == .analysis {
-                        reasoningTokenIDs.append(payloadToken)
-                    } else if header.channel == .final {
-                        responseTokenIDs.append(payloadToken)
-                    }
-                case .closed(let frame):
-                    switch frame.header.channel {
-                    case .analysis:
-                        if frame.terminator != .end { sawInvalidTerminator = true }
-                    case .final:
-                        if frame.terminator == .return || frame.terminator == .end {
-                            sawFinalCompletion = true
-                        } else {
-                            sawInvalidTerminator = true
-                        }
-                    case .commentary, .other:
-                        sawInvalidTerminator = true
-                    }
-                case .consumed:
-                    break
-                }
-            }
-        }
         for step in parser.finish() {
             guard case .closed(let frame) = step else { continue }
             if frame.header.channel == .final, frame.terminator == .incomplete {
-                // XGrammar's empty final-tag suffix terminates as soon as the
-                // JSON schema completes, before a Harmony stop token is emitted.
+                // XGrammar has already accepted the JSON schema. A separately
+                // sampled stop token is transport metadata, not part of the
+                // constrained response, and some Harmony checkpoints select
+                // `<|call|>` here even though the completed frame is `final`.
                 sawFinalCompletion = true
             } else {
                 sawInvalidTerminator = true
