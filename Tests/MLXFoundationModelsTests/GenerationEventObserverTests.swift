@@ -25,9 +25,9 @@ struct GenerationEventObserverTests {
             do { for try await _ in channel {} } catch {}
         }
         let box = EventBox()
-        await MLXLanguageModel.Executor.$generationObserver.withValue({ box.append($0) }) {
-            await body(channel)
-        }
+        await MLXLanguageModel.Executor.$generationObserver.withValue(
+            { box.append($0) },
+            operation: { await body(channel) })
         drain.cancel()
         return box.events
     }
@@ -100,6 +100,33 @@ struct GenerationEventObserverTests {
             return text
         }
         #expect(textEvents == [json])
+    }
+
+    @Test("usage emission adds prior internal generation work")
+    func accumulatesPriorGenerationUsage() async {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let events = await capture { channel in
+            await MLXLanguageModel.Executor.emitUsage(
+                input: .init(totalTokenCount: 7, cachedTokenCount: 2),
+                output: .init(totalTokenCount: 3, reasoningTokenCount: 1),
+                priorUsage: .init(
+                    inputTotalTokenCount: 11,
+                    inputCachedTokenCount: 4,
+                    outputTotalTokenCount: 5,
+                    outputReasoningTokenCount: 2),
+                entryID: "usage-entry",
+                into: channel)
+        }
+
+        guard case .updateUsage(let input, let output, "usage-entry") = events.first else {
+            Issue.record("expected cumulative .updateUsage mirror")
+            return
+        }
+        #expect(input.totalTokenCount == 18)
+        #expect(input.cachedTokenCount == 6)
+        #expect(output.totalTokenCount == 8)
+        #expect(output.reasoningTokenCount == 3)
     }
 
     @Test("no observer attached means no crash and events are simply sent")

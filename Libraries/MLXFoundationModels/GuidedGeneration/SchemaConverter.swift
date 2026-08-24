@@ -64,9 +64,10 @@ enum SchemaConverter {
                 "type": "json_schema",
                 "json_schema": schema,
             ],
-            // XGrammar owns schema completion; Harmony stop tokens remain
-            // sampler-owned and must not be required behind the JSON grammar.
-            "end": ["<|end|>", ""],
+            // Harmony trains final responses to terminate with `<|return|>`.
+            // Requiring that exact token keeps the grammar from accepting the
+            // sibling `<|call|>` stop token reserved for tool calls.
+            "end": "<|return|>",
         ]
         let analysis: [String: Any] = [
             "type": "tag",

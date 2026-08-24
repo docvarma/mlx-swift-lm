@@ -715,6 +715,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 entryID: String?)
         }
 
+        struct UsageContribution: Sendable {
+            let inputTotalTokenCount: Int
+            let inputCachedTokenCount: Int
+            let outputTotalTokenCount: Int
+            let outputReasoningTokenCount: Int
+        }
+
         /// Attached only by tests (via `$generationObserver.withValue`); nil in
         /// shipping. Task-local so it reaches child tasks that also emit (e.g.
         /// the guided-generation text forwarder).
@@ -796,17 +803,32 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         static func emitUsage(
             input: LanguageModelExecutorGenerationChannel.Usage.Input,
             output: LanguageModelExecutorGenerationChannel.Usage.Output,
+            priorUsage: UsageContribution? = nil,
             metadata: [String: any ConvertibleToGeneratedContent & Sendable] = [:],
             entryID: String?,
             into channel: LanguageModelExecutorGenerationChannel
         ) async {
-            generationObserver?(.updateUsage(input: input, output: output, entryID: entryID))
+            let cumulativeInput = LanguageModelExecutorGenerationChannel.Usage.Input(
+                totalTokenCount: input.totalTokenCount
+                    + (priorUsage?.inputTotalTokenCount ?? 0),
+                cachedTokenCount: input.cachedTokenCount
+                    + (priorUsage?.inputCachedTokenCount ?? 0))
+            let cumulativeOutput = LanguageModelExecutorGenerationChannel.Usage.Output(
+                totalTokenCount: output.totalTokenCount
+                    + (priorUsage?.outputTotalTokenCount ?? 0),
+                reasoningTokenCount: output.reasoningTokenCount
+                    + (priorUsage?.outputReasoningTokenCount ?? 0))
+            generationObserver?(
+                .updateUsage(
+                    input: cumulativeInput,
+                    output: cumulativeOutput,
+                    entryID: entryID))
             await channel.send(
                 .response(
                     entryID: entryID,
                     action: .updateUsage(
-                        input: input,
-                        output: output,
+                        input: cumulativeInput,
+                        output: cumulativeOutput,
                         metadata: metadata)))
         }
 
@@ -1427,6 +1449,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     requestedTemperature: request.generationOptions.temperature,
                                     samplingConfiguration: requestedSamplingConfiguration,
                                     attachmentCount: attachmentCount,
+                                    priorUsage: result.usageContribution,
                                     entryID: entryID,
                                     reasoningEntryID: reasoningEntryID,
                                     context: context,
@@ -1760,6 +1783,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var reasoningTokenCount = 0
             var endedInsideReasoning = false
             var protocolError: String?
+
+            var usageContribution: UsageContribution? {
+                guard let completionInfo else { return nil }
+                return UsageContribution(
+                    inputTotalTokenCount: completionInfo.totalPromptTokenCount,
+                    inputCachedTokenCount: completionInfo.cachedPromptTokenCount,
+                    outputTotalTokenCount: completionInfo.generationTokenCount,
+                    outputReasoningTokenCount: min(
+                        reasoningTokenCount,
+                        completionInfo.generationTokenCount))
+            }
         }
 
         private func runAllowedToolGeneration(
@@ -1982,6 +2016,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
             attachmentCount: Int,
+            priorUsage: UsageContribution? = nil,
             entryID: String,
             reasoningEntryID: String,
             context: ModelContext,
@@ -2035,6 +2070,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         totalTokenCount: prefixTokenIDs.count,
                         reasoningTokenCount: min(
                             reasoningTokenCount, prefixTokenIDs.count)),
+                    priorUsage: priorUsage,
                     metadata: ["incompleteOutput": true],
                     entryID: entryID,
                     into: channel)
@@ -2060,6 +2096,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         totalTokenCount: prefixTokenIDs.count,
                         reasoningTokenCount: min(
                             reasoningTokenCount, prefixTokenIDs.count)),
+                    priorUsage: priorUsage,
                     metadata: ["incompleteOutput": true],
                     entryID: entryID,
                     into: channel)
@@ -2248,6 +2285,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         reasoningTokenCount: min(
                             reasoningTokenCount,
                             generatedTokenCount + prefixTokenIDs.count)),
+                    priorUsage: priorUsage,
                     metadata: incomplete ? ["incompleteOutput": true] : [:],
                     entryID: entryID,
                     into: channel)
