@@ -1635,7 +1635,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     vocabSize: Int(xgTokenizer.vocabSize),
                                     completionReserve: reserves.soft,
                                     hardReserve: reserves.hard,
-                                    closingBias: bias.closing,
+                                    closingBias: usesHarmonyToolGrammar ? nil : bias.closing,
                                     preludeClosingBias: usesHarmonyToolGrammar
                                         ? bias.harmonyClosing : nil,
                                     payloadStartTokenIDs: usesHarmonyToolGrammar
@@ -2199,7 +2199,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         vocabSize: Int(xgTokenizer.vocabSize),
                         completionReserve: reserves.soft,
                         hardReserve: reserves.hard,
-                        closingBias: bias.closing,
+                        closingBias: usesHarmonyGrammar ? nil : bias.closing,
                         preludeClosingBias: usesHarmonyGrammar ? bias.harmonyClosing : nil,
                         payloadStartTokenIDs: usesHarmonyGrammar
                             ? bias.harmonyPayloadStartTokenIDs : [],

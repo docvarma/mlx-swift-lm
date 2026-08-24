@@ -46,6 +46,10 @@ public enum GuidedGenerationLoop {
             self.usesPreludeBias = hasPreludeBias && !payloadStartTokenIDs.isEmpty
         }
 
+        func activeBias(ordinary: MLXArray?, prelude: MLXArray?) -> MLXArray? {
+            usesPreludeBias ? prelude : ordinary
+        }
+
         mutating func record(tokenID: Int) {
             if payloadStartTokenIDs.contains(tokenID) {
                 usesPreludeBias = false
@@ -300,10 +304,10 @@ public enum GuidedGenerationLoop {
             // the grammar has accepted the output.
             var activeBias: MLXArray? = nil
             if mask.needsApply {
-                let phaseClosingBias =
-                    protocolClosingBiasState.usesPreludeBias
-                    ? preludeClosingBias
-                    : closingBias
+                let phaseClosingBias = protocolClosingBiasState.activeBias(
+                    ordinary: closingBias,
+                    prelude: preludeClosingBias
+                )
                 if let bias = phaseClosingBias {
                     if hardReserve > 0 && tokenCount >= maxTokens - hardReserve {
                         // Hard zone: force closing tokens, suppress everything else.

@@ -17,10 +17,15 @@ struct ForcedCompletionSamplingTests {
         )
 
         #expect(state.usesPreludeBias)
+        let preludeBias = MLXArray([Float(300)])
+        #expect(
+            state.activeBias(ordinary: nil, prelude: preludeBias)?.asArray(Float.self)
+                == [300])
         state.record(tokenID: 3)
         #expect(state.usesPreludeBias)
         state.record(tokenID: 7)
         #expect(!state.usesPreludeBias)
+        #expect(state.activeBias(ordinary: nil, prelude: preludeBias) == nil)
         state.record(tokenID: 3)
         #expect(!state.usesPreludeBias)
     }
