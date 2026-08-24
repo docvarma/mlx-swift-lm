@@ -56,17 +56,20 @@ public struct ModelProtocolError: Error, Sendable, Equatable, LocalizedError {
 final class TokenizerBias: @unchecked Sendable {
     let closing: MLXArray
     let harmonyClosing: MLXArray
+    let harmonyPayloadStartTokenIDs: Set<Int>
     let whitespace: MLXArray
     let whitespaceTokenIDs: Set<Int>
 
     init(
         closing: MLXArray,
         harmonyClosing: MLXArray,
+        harmonyPayloadStartTokenIDs: Set<Int>,
         whitespace: MLXArray,
         whitespaceTokenIDs: Set<Int>
     ) {
         self.closing = closing
         self.harmonyClosing = harmonyClosing
+        self.harmonyPayloadStartTokenIDs = harmonyPayloadStartTokenIDs
         self.whitespace = whitespace
         self.whitespaceTokenIDs = whitespaceTokenIDs
     }
@@ -233,12 +236,19 @@ private actor ModelCache {
             eosTokenId: tokenizer.eosTokenId,
             additionalStopTokenIds: harmonyStopTokenIDs
         )
+        let harmonyPayloadStartTokenIDs: Set<Int>
+        if let harmonyConstrainTokenID = tokenizer.convertTokenToId("<|constrain|>") {
+            harmonyPayloadStartTokenIDs = [harmonyConstrainTokenID]
+        } else {
+            harmonyPayloadStartTokenIDs = []
+        }
         let (whitespace, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
             tokenizer: tokenizer
         )
         let bias = TokenizerBias(
             closing: closing,
             harmonyClosing: harmonyClosing,
+            harmonyPayloadStartTokenIDs: harmonyPayloadStartTokenIDs,
             whitespace: whitespace,
             whitespaceTokenIDs: whitespaceTokenIDs
         )
@@ -1541,8 +1551,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             modelID: modelID,
                             tokenizer: context.tokenizer
                         )
-                        let closingBias =
-                            usesHarmonyToolGrammar ? bias.harmonyClosing : bias.closing
                         let structuralReserve = CompletionReserve.estimate(
                             schemaJSON: toolCallingEnvelopeJSON,
                             tokenizer: context.tokenizer
@@ -1627,7 +1635,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     vocabSize: Int(xgTokenizer.vocabSize),
                                     completionReserve: reserves.soft,
                                     hardReserve: reserves.hard,
-                                    closingBias: closingBias,
+                                    closingBias: bias.closing,
+                                    preludeClosingBias: usesHarmonyToolGrammar
+                                        ? bias.harmonyClosing : nil,
+                                    payloadStartTokenIDs: usesHarmonyToolGrammar
+                                        ? bias.harmonyPayloadStartTokenIDs : [],
                                     whitespaceBias: whitespaceBias,
                                     whitespaceTokenIDs: whitespaceTokenIDs,
                                     tokenCompletion: {
@@ -2187,7 +2199,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         vocabSize: Int(xgTokenizer.vocabSize),
                         completionReserve: reserves.soft,
                         hardReserve: reserves.hard,
-                        closingBias: usesHarmonyGrammar ? bias.harmonyClosing : bias.closing,
+                        closingBias: bias.closing,
+                        preludeClosingBias: usesHarmonyGrammar ? bias.harmonyClosing : nil,
+                        payloadStartTokenIDs: usesHarmonyGrammar
+                            ? bias.harmonyPayloadStartTokenIDs : [],
                         whitespaceBias: bias.whitespace,
                         whitespaceTokenIDs: bias.whitespaceTokenIDs,
                         tokenCompletion: {

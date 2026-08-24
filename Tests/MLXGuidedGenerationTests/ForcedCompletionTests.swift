@@ -9,6 +9,22 @@ import Testing
 @Suite
 struct ForcedCompletionSamplingTests {
 
+    @Test("Protocol prelude bias ends at the constrained payload marker")
+    func protocolPreludeBiasIsPhaseBounded() {
+        var state = GuidedGenerationLoop.ProtocolClosingBiasState(
+            hasPreludeBias: true,
+            payloadStartTokenIDs: [7]
+        )
+
+        #expect(state.usesPreludeBias)
+        state.record(tokenID: 3)
+        #expect(state.usesPreludeBias)
+        state.record(tokenID: 7)
+        #expect(!state.usesPreludeBias)
+        state.record(tokenID: 3)
+        #expect(!state.usesPreludeBias)
+    }
+
     @Test("Closing bias overrides model logit, selecting quote over continuation token")
     func closingBiasSelectsQuoteOverContinuation() {
         // 'A' (65) has higher raw logit than '"' (34),

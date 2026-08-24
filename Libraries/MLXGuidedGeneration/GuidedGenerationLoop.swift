@@ -35,6 +35,24 @@ public enum GuidedGenerationLoop {
         case stop
     }
 
+    /// Tracks whether a protocol-specific closing bias is still in the
+    /// unconstrained prelude or has crossed into its constrained payload.
+    struct ProtocolClosingBiasState {
+        private(set) var usesPreludeBias: Bool
+        private let payloadStartTokenIDs: Set<Int>
+
+        init(hasPreludeBias: Bool, payloadStartTokenIDs: Set<Int>) {
+            self.payloadStartTokenIDs = payloadStartTokenIDs
+            self.usesPreludeBias = hasPreludeBias && !payloadStartTokenIDs.isEmpty
+        }
+
+        mutating func record(tokenID: Int) {
+            if payloadStartTokenIDs.contains(tokenID) {
+                usesPreludeBias = false
+            }
+        }
+    }
+
     /// Runs the guided generation loop, yielding text deltas through `emit`.
     ///
     /// Overlaps grammar mask computation with GPU forward passes: after
@@ -68,6 +86,12 @@ public enum GuidedGenerationLoop {
     ///     Only used when `kvBits` is non-nil.
     ///   - closingBias: Pre-computed logit bias array favoring closing tokens
     ///     (from `ClosingTokenBias.compute`). Nil disables forced completion.
+    ///   - preludeClosingBias: Optional protocol-specific bias used only before
+    ///     the first `payloadStartTokenIDs` token is generated. This lets a
+    ///     framed protocol close free-form reasoning without carrying its
+    ///     control-token bias into a JSON string payload.
+    ///   - payloadStartTokenIDs: Tokens that irreversibly enter the constrained
+    ///     payload and restore the ordinary `closingBias`.
     ///   - whitespaceBias: Pre-computed negative logit bias array penalizing
     ///     whitespace-only tokens (from `WhitespaceTokenBias.compute`). Nil
     ///     disables whitespace suppression.
@@ -107,6 +131,8 @@ public enum GuidedGenerationLoop {
         completionReserve: Int = 64,
         hardReserve: Int = 0,
         closingBias: MLXArray? = nil,
+        preludeClosingBias: MLXArray? = nil,
+        payloadStartTokenIDs: Set<Int> = [],
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
@@ -167,6 +193,10 @@ public enum GuidedGenerationLoop {
         var grammarStopped = false
         var sampledStopTokenID: Int?
         var whitespaceTracker = WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIDs)
+        var protocolClosingBiasState = ProtocolClosingBiasState(
+            hasPreludeBias: preludeClosingBias != nil,
+            payloadStartTokenIDs: payloadStartTokenIDs
+        )
 
         // Pre-compute bias arrays used in the zone policy.
         //
@@ -180,7 +210,7 @@ public enum GuidedGenerationLoop {
         // when output is structurally valid but semantically short, which
         // is acceptable near the budget limit.
         let eosPenalty: MLXArray? =
-            if let bias = closingBias {
+            if let bias = closingBias ?? preludeClosingBias {
                 {
                     let biasLen = bias.shape[0]
                     var penalty = [Float32](repeating: 0.0, count: biasLen)
@@ -270,7 +300,11 @@ public enum GuidedGenerationLoop {
             // the grammar has accepted the output.
             var activeBias: MLXArray? = nil
             if mask.needsApply {
-                if let bias = closingBias {
+                let phaseClosingBias =
+                    protocolClosingBiasState.usesPreludeBias
+                    ? preludeClosingBias
+                    : closingBias
+                if let bias = phaseClosingBias {
                     if hardReserve > 0 && tokenCount >= maxTokens - hardReserve {
                         // Hard zone: force closing tokens, suppress everything else.
                         var hardBias = which(bias .> 0, Float32(0.0), Float32(-10000.0))
@@ -342,6 +376,7 @@ public enum GuidedGenerationLoop {
 
             diagnosticSink?.recordSampledToken(tokenId)
             generatedTokenIDs.append(tokenId)
+            protocolClosingBiasState.record(tokenID: tokenId)
             // Yield the sampled token
             detokenizer.append(token: tokenId)
             if let text = detokenizer.next() {
@@ -393,6 +428,7 @@ public enum GuidedGenerationLoop {
                     }
                     diagnosticSink?.recordFastForwardToken(Int(ffToken))
                     generatedTokenIDs.append(Int(ffToken))
+                    protocolClosingBiasState.record(tokenID: Int(ffToken))
                     detokenizer.append(token: Int(ffToken))
                     if let text = detokenizer.next() {
                         accumulatedText += text
