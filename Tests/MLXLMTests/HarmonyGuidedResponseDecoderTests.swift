@@ -59,6 +59,29 @@ struct HarmonyGuidedResponseDecoderTests {
                 tokenizer: tokenizer) == nil)
     }
 
+    @Test("Decodes schema payload committed by the sampled stop token")
+    func finalPayloadWithSampledStopToken() throws {
+        // The final frame's <|end|> arrives only as the sampled stop token,
+        // not inside the generated token stream.
+        let pieces = [
+            "<|channel|>", "final ", "<|constrain|>", "json", "<|message|>",
+            #"{"answer":"yes"}"#,
+        ]
+        let tokenizer = GuidedResponseTokenizer(tokens: pieces + guidedControlTokens)
+        let tokenIDs = try pieces.map { try #require(tokenizer.convertTokenToId($0)) }
+        let endTokenID = try #require(tokenizer.convertTokenToId("<|end|>"))
+        let response = try #require(
+            HarmonyGuidedResponseDecoder.decode(
+                tokenIDs: tokenIDs,
+                sampledStopTokenID: endTokenID,
+                grammarTerminated: true,
+                tokenizer: tokenizer))
+
+        #expect(response.reasoningText.isEmpty)
+        #expect(response.responseText == #"{"answer":"yes"}"#)
+        #expect(response.reasoningTokenCount == 0)
+    }
+
     @Test("Decodes a required Harmony tool call after analysis")
     func requiredToolCall() throws {
         let bufferedPieces = [

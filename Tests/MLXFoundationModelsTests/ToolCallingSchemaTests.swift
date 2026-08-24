@@ -74,6 +74,19 @@ private struct BookTripArgs {
     var traveler: Traveler
 }
 
+/// An optional `String` property serializes as `"type": ["string", "null"]`,
+/// exercising the nullable-string arm of the tagged-parameter grammars.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private struct EditArgs {
+    @Guide(description: "Replacement text; null clears the field.")
+    var patch: String?
+    @Guide(description: "Reviewer note.")
+    var note: String
+    @Guide(description: "Number of lines affected.")
+    var lines: Int
+}
+
 /// Unit tests for the tool-calling schema and grammar builders.
 ///
 /// Covers both:
@@ -365,6 +378,22 @@ struct ToolCallingSchemaTests {
                 ToolCallFormat.glm4,
                 "<tool_call>\nget_weather<arg_key>location</arg_key><arg_value>Boston</arg_value>\n</tool_call>"
             ),
+            (
+                ToolCallFormat.llama3,
+                "<|python_tag|>{\"name\": \"get_weather\", \"parameters\": {\"location\": \"Boston\"}}"
+            ),
+            (
+                ToolCallFormat.lfm2,
+                "<|tool_call_start|>[get_weather(location='Boston')]<|tool_call_end|>"
+            ),
+            (
+                ToolCallFormat.kimiK2,
+                "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\": \"Boston\"}<|tool_call_end|><|tool_calls_section_end|>"
+            ),
+            (
+                ToolCallFormat.minimaxM2,
+                "<minimax:tool_call><invoke name=\"get_weather\"><parameter name=\"location\">Boston</parameter></invoke></minimax:tool_call>"
+            ),
         ])
     func priorityFamilyParsersRoundTripNativeRequiredCalls(
         _ example: (format: ToolCallFormat, output: String)
@@ -392,6 +421,58 @@ struct ToolCallingSchemaTests {
         } else {
             #expect(calls.first?.id?.hasPrefix("call_") == true)
         }
+    }
+
+    @Test(arguments: [ToolCallFormat.glm4, .minimaxM2, .atem])
+    func taggedParameterGrammarsTreatNullableStringAsFreeText(_ format: ToolCallFormat) throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let edit = Transcript.ToolDefinition(
+            name: "apply_edit",
+            description: "Apply an edit",
+            parameters: EditArgs.generationSchema)
+
+        // FoundationModels flattens the optional string to a plain
+        // "type": "string" property excluded from `required` — the literal
+        // "type": ["string", "null"] union is not expressible through
+        // GenerationSchema (anyOf would serialize as a $defs/$ref pair), so
+        // this exercises the nullable-string arm as far as the
+        // ToolDefinition seam allows.
+        let schemaJSON = String(
+            decoding: try JSONEncoder().encode(EditArgs.generationSchema), as: UTF8.self)
+        #expect(!schemaJSON.contains(#""null""#))
+        let schema = try parseAsDictionary(schemaJSON)
+        #expect((schema["required"] as? [String])?.contains("patch") == false)
+
+        let grammar = try SchemaConverter.encodeRequiredToolCallingGrammar(
+            tools: [edit], format: format)
+        let parsed = try parseAsDictionary(grammar)
+        let tags = collectTags(in: parsed)
+
+        func parameterBegin(_ name: String) -> String {
+            switch format {
+            case .glm4: "<arg_key>\(name)</arg_key><arg_value>"
+            case .minimaxM2: "<parameter name=\"\(name)\">"
+            case .atem: "<atem:parameter name=\"\(name)\">"
+            default: ""
+            }
+        }
+        func parameterTag(_ name: String) throws -> [String: Any] {
+            try #require(tags.first { $0["begin"] as? String == parameterBegin(name) })
+        }
+
+        // Optional and plain strings are free text between the parameter
+        // tags — never wrapped in a json_schema constraint.
+        for name in ["patch", "note"] {
+            let content = try #require(try parameterTag(name)["content"] as? [String: Any])
+            #expect(content["type"] as? String == "any_text")
+            #expect(content["json_schema"] == nil)
+        }
+
+        // Non-string parameters stay schema-constrained.
+        let linesContent = try #require(try parameterTag("lines")["content"] as? [String: Any])
+        #expect(linesContent["type"] as? String == "json_schema")
+        let linesSchema = try #require(linesContent["json_schema"] as? [String: Any])
+        #expect(linesSchema["type"] as? String == "integer")
     }
 
     @Test
@@ -475,6 +556,42 @@ struct ToolCallingSchemaTests {
         #expect(grammar.contains("<|eot|>"))
         _ = try GrammarConstraint(
             tokenizer: makeByteTokenizer(), structuralTag: grammar, fastForward: false)
+    }
+
+    @Test
+    func onyxFramedResponseDecoderExtractsOnlyTheJSONPayload() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        // The seam `MLXLanguageModel.decodeRequiredFramedResponse` drives: the
+        // format's framed token-stream decoder with no tools and no stop
+        // strings. `<|eot|>` plays the role of the sampled stop token.
+        let tokenizer = OnyxFrameTokenizer()
+        var decoder = try #require(
+            ToolCallFormat.atem.makeProtocolTokenStreamDecoder(
+                tokenizer: tokenizer, tools: nil, stopStrings: []))
+        let payload = #"{"location":"Boston"}"#
+        let eot = try #require(tokenizer.convertTokenToId("<|eot|>"))
+        let frameTokens = [
+            tokenizer.id("<|start|>"), tokenizer.id("assistant to=user"),
+            tokenizer.id("<|message|>"), tokenizer.id(payload),
+        ]
+
+        var events: [TokenStreamEvent] = []
+        for token in frameTokens + [eot] {
+            #expect(
+                decoder.push(token) { event in
+                    events.append(event)
+                    return true
+                })
+        }
+        #expect(
+            decoder.finish { event in
+                events.append(event)
+                return true
+            })
+
+        // Exactly the payload crosses as content — no frame tokens, no tool
+        // call, no protocol error.
+        #expect(events == [.response(payload)])
     }
 
     @Test
@@ -747,6 +864,20 @@ struct ToolCallingSchemaTests {
         }
     }
 
+    /// Recursively collects every structural-tag `{"type": "tag", ...}`
+    /// object in a parsed grammar tree, at any depth.
+    private func collectTags(in value: Any) -> [[String: Any]] {
+        switch value {
+        case let object as [String: Any]:
+            let own = object["type"] as? String == "tag" ? [object] : []
+            return own + object.values.flatMap { collectTags(in: $0) }
+        case let array as [Any]:
+            return array.flatMap { collectTags(in: $0) }
+        default:
+            return []
+        }
+    }
+
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func assertToolTag(
         _ tag: [String: Any],
@@ -779,6 +910,44 @@ struct ToolCallingSchemaTests {
             eosTokenId: Int32(vocabSize - 1)
         )
     }
+}
+
+/// Minimal tokenizer carrying the Onyx control vocabulary. Whole text chunks
+/// are single tokens so frames can be pushed exactly as the model emits them.
+private final class OnyxFrameTokenizer: Tokenizer, @unchecked Sendable {
+    private var nextID = 1
+    private var textToID: [String: Int] = [:]
+    private var idToText: [Int: String] = [:]
+
+    init() {
+        for token in ["<|start|>", "<|message|>", "<|eom|>", "<|eot|>"] {
+            _ = id(token)
+        }
+    }
+
+    func id(_ text: String) -> Int {
+        if let id = textToID[text] { return id }
+        let id = nextID
+        nextID += 1
+        textToID[text] = id
+        idToText[id] = text
+        return id
+    }
+
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] { [id(text)] }
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        tokenIds.compactMap { idToText[$0] }.joined()
+    }
+    func convertTokenToId(_ token: String) -> Int? { textToID[token] }
+    func convertIdToToken(_ id: Int) -> String? { idToText[id] }
+    var bosToken: String? { nil }
+    var eosToken: String? { "<|eot|>" }
+    var unknownToken: String? { nil }
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] { [] }
 }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)
