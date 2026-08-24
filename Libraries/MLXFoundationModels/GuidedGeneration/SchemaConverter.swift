@@ -64,10 +64,11 @@ enum SchemaConverter {
                 "type": "json_schema",
                 "json_schema": schema,
             ],
-            // Harmony trains final responses to terminate with `<|return|>`.
-            // Requiring that exact token keeps the grammar from accepting the
-            // sibling `<|call|>` stop token reserved for tool calls.
-            "end": "<|return|>",
+            // XGrammar may own completion as soon as the JSON schema accepts,
+            // so the empty suffix remains valid. If the model emits a Harmony
+            // terminator first, only the final-response `<|return|>` is valid;
+            // `<|call|>` remains reserved for tool calls and is excluded.
+            "end": ["<|return|>", ""],
         ]
         let analysis: [String: Any] = [
             "type": "tag",

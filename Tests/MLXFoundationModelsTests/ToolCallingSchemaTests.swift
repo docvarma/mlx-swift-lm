@@ -618,7 +618,7 @@ struct ToolCallingSchemaTests {
         #expect(
             elements[2]["begin"] as? String
                 == "<|channel|>final <|constrain|>json<|message|>")
-        #expect(elements[2]["end"] as? String == "<|return|>")
+        #expect(elements[2]["end"] as? [String] == ["<|return|>", ""])
 
         let tokenizer = try makeByteTokenizer()
         _ = try GrammarConstraint(
