@@ -23,7 +23,7 @@ public enum ClosingTokenBias {
     /// Returns an MLXArray of shape [vocabSize]. Closing tokens get a large
     /// positive value (tiered by priority), all others get 0.0.
     ///
-    /// Stop (+300): EOS token
+    /// Stop (+300): EOS token and any caller-supplied protocol stop tokens
     /// Structural close (+200): `"`, `}`, `]`
     /// Numeric close (+100): single digits `0`-`9`
     ///
@@ -31,7 +31,11 @@ public enum ClosingTokenBias {
     /// string closes the string instead of filling the remaining budget with
     /// numeric text. Digits remain biased when the grammar masks structural
     /// tokens out for an integer value.
-    public static func compute(tokenizer: any Tokenizer, eosTokenId: Int?) -> MLXArray {
+    public static func compute(
+        tokenizer: any Tokenizer,
+        eosTokenId: Int?,
+        additionalStopTokenIds: Set<Int> = []
+    ) -> MLXArray {
         // Discover vocab size by scanning token IDs
         var vocabSize = 0
         while tokenizer.convertIdToToken(vocabSize) != nil {
@@ -54,6 +58,9 @@ public enum ClosingTokenBias {
         // Stop bias applied last so it overrides any ordinary token class.
         if let eos = eosTokenId, eos >= 0, eos < vocabSize {
             biases[eos] = stopBias
+        }
+        for tokenID in additionalStopTokenIds where tokenID >= 0 && tokenID < vocabSize {
+            biases[tokenID] = stopBias
         }
 
         return MLXArray(biases)

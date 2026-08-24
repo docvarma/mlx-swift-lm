@@ -17,6 +17,21 @@ extension FoundationModelsCacheTests {
     @Suite("MLXLanguageModel tokenizer-bias cache")
     struct TokenizerBiasCaching {
 
+        @Test("Harmony closing bias favors the analysis terminator")
+        func harmonyClosingBiasIncludesAnalysisTerminator() async {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let tokenizer = CountingTokenizer(tokens: ["a", "\"", "<|end|>"])
+            let bias = await MLXLanguageModel.makeTokenizerBias(
+                modelID: "org/harmony-bias-\(UUID().uuidString)",
+                tokenizer: tokenizer)
+
+            let ordinary = bias.closing.asArray(Float.self)
+            let harmony = bias.harmonyClosing.asArray(Float.self)
+            #expect(ordinary == [0, 200, 0])
+            #expect(harmony == [0, 200, 300])
+        }
+
         @Test("makeTokenizerBias scans the vocab once, then serves from cache")
         func cachesPerModel() async {
             guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
