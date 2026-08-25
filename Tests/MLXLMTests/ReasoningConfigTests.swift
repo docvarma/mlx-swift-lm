@@ -47,6 +47,42 @@ struct ReasoningConfigTests {
         #expect(ctx?["enable_thinking"] == nil)
     }
 
+    @Test func templateEffortUsesDefaultAndTypedOverride() throws {
+        let strategy = ReasoningPromptStrategy.templateEffort(
+            key: "reasoning_effort", defaultEffort: .medium)
+        #expect(
+            try strategy.additionalContext(forThinkingEnabled: nil)?["reasoning_effort"] as? String
+                == "medium")
+        #expect(
+            try strategy.additionalContext(
+                forThinkingEnabled: true, reasoningEffort: .high)?["reasoning_effort"] as? String
+                == "high")
+    }
+
+    @Test func templateEffortAcceptsEveryTypedLevel() throws {
+        let strategy = ReasoningPromptStrategy.templateEffort(
+            key: "reasoning_effort", defaultEffort: .medium)
+        let levels: [(ReasoningEffort, String)] = [
+            (ReasoningEffort.low, "low"),
+            (.medium, "medium"),
+            (.high, "high"),
+        ]
+        for (effort, rawValue) in levels {
+            #expect(
+                try strategy.additionalContext(
+                    forThinkingEnabled: true, reasoningEffort: effort)?["reasoning_effort"]
+                    as? String == rawValue)
+        }
+    }
+
+    @Test func templateEffortCannotBeSuppressed() {
+        #expect(throws: ReasoningError.cannotDisableReasoning) {
+            try ReasoningPromptStrategy.templateEffort(
+                key: "reasoning_effort", defaultEffort: .medium
+            ).additionalContext(forThinkingEnabled: false)
+        }
+    }
+
     @Test func alwaysOnIgnoresEnabledLevels() throws {
         let on = try ReasoningPromptStrategy.alwaysOn.additionalContext(forThinkingEnabled: true)
         let unspecified = try ReasoningPromptStrategy.alwaysOn.additionalContext(

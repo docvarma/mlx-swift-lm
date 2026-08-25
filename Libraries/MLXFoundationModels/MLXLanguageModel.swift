@@ -1184,6 +1184,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     let resolved = configurationResolver.resolve(
                         context.configuration, for: descriptor)
                     let toolCallFormat = resolved.toolCallFormat ?? .json
+                    let reasoningPromptContext = try Self.reasoningPromptContext(
+                        config: resolved.reasoningConfig,
+                        level: request.contextOptions.reasoningLevel)
                     try Self.validateFramedProtocol(
                         toolCallFormat, tokenizer: context.tokenizer)
 
@@ -1216,7 +1219,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     //
                     // - Toggleable strategies (`.templateFlag`) re-render the
                     //   prompt with thinking off (handled below per path).
-                    // - Non-suppressible strategies (`.alwaysOn`) raise
+                    // - Non-suppressible strategies (`.alwaysOn`,
+                    //   `.templateEffort`, and `.none`) raise
                     //   `unsupportedCapability` BEFORE generation, regardless
                     //   of which path (tools / schema / unconstrained) the
                     //   request would otherwise take. The throw is
@@ -1227,8 +1231,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     //   fallback.
                     if !declaresReasoning, let suppressionConfig = resolved.reasoningConfig {
                         do {
-                            _ = try suppressionConfig.promptStrategy
-                                .additionalContext(forThinkingEnabled: false)
+                            _ = try Self.reasoningPromptAdditionalContext(
+                                config: suppressionConfig,
+                                thinkingEnabled: false)
                         } catch ReasoningError.cannotDisableReasoning {
                             throw LanguageModelError.unsupportedCapability(
                                 LanguageModelError.UnsupportedCapability(
@@ -1252,7 +1257,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // When .reasoning is OMITTED on the unconstrained path,
                     // re-render the prompt with thinking off so the model
                     // doesn't emit `<think>`. Toggleable-only;
-                    // .alwaysOn was already rejected above.
+                    // non-suppressible strategies were already rejected above.
                     let suppressedInput: LMInput?
                     if mayRunReasoningPath, !declaresReasoning,
                         let suppressionConfig = resolved.reasoningConfig
@@ -1273,12 +1278,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     if mayRunReasoningPath, declaresReasoning,
                         let reasoningConfig = resolved.reasoningConfig
                     {
-                        let thinkingEnabled = Self.thinkingEnabled(
-                            for: request.contextOptions.reasoningLevel)
-                        reasoningEnabledForSchema = thinkingEnabled != false
+                        reasoningEnabledForSchema = reasoningPromptContext.thinkingEnabled != false
                         let reasoningInput = try await Self.preparedInput(
                             messages: generationMessages, config: reasoningConfig,
-                            thinkingEnabled: thinkingEnabled, processor: context.processor,
+                            thinkingEnabled: reasoningPromptContext.thinkingEnabled,
+                            reasoningEffort: reasoningPromptContext.reasoningEffort,
+                            processor: context.processor,
                             cannotDisableMessage:
                                 "This model always reasons; reasoning cannot be disabled via reasoningLevel."
                         )
@@ -1343,15 +1348,26 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // rejected by the capability gate above; `.none`/no-config
                         // models take no context.
                         let toolAwareContext: [String: any Sendable]?
-                        if case .templateFlag(let key, let defaultOn)? =
-                            resolved.reasoningConfig?.promptStrategy
-                        {
-                            let enabled =
-                                declaresReasoning
-                                ? (Self.thinkingEnabled(
-                                    for: request.contextOptions.reasoningLevel) ?? defaultOn)
-                                : false
-                            toolAwareContext = [key: enabled]
+                        if let reasoningConfig = resolved.reasoningConfig {
+                            let thinkingEnabled: Bool?
+                            if declaresReasoning {
+                                thinkingEnabled = reasoningPromptContext.thinkingEnabled
+                            } else {
+                                thinkingEnabled = false
+                            }
+                            do {
+                                toolAwareContext = try Self.reasoningPromptAdditionalContext(
+                                    config: reasoningConfig,
+                                    thinkingEnabled: thinkingEnabled,
+                                    reasoningEffort: reasoningPromptContext.reasoningEffort)
+                            } catch ReasoningError.cannotDisableReasoning {
+                                throw LanguageModelError.unsupportedCapability(
+                                    LanguageModelError.UnsupportedCapability(
+                                        capability: .reasoning,
+                                        debugDescription:
+                                            "This model always reasons; reasoning cannot be disabled via reasoningLevel."
+                                    ))
+                            }
                         } else {
                             toolAwareContext = nil
                         }
@@ -1437,13 +1453,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 var schemaReasoningEnabled = false
                                 if let reasoningConfig = resolved.reasoningConfig {
                                     if declaresReasoning {
-                                        let thinkingEnabled = Self.thinkingEnabled(
-                                            for: request.contextOptions.reasoningLevel)
-                                        schemaReasoningEnabled = thinkingEnabled != false
+                                        schemaReasoningEnabled =
+                                            reasoningPromptContext.thinkingEnabled != false
                                         schemaInput = try await Self.preparedInput(
                                             messages: schemaMessages,
                                             config: reasoningConfig,
-                                            thinkingEnabled: thinkingEnabled,
+                                            thinkingEnabled: reasoningPromptContext.thinkingEnabled,
+                                            reasoningEffort: reasoningPromptContext.reasoningEffort,
                                             processor: context.processor,
                                             cannotDisableMessage:
                                                 "This model always reasons; reasoning cannot be disabled via reasoningLevel."
@@ -1461,6 +1477,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                             messages: schemaMessages,
                                             config: reasoningConfig,
                                             thinkingEnabled: false,
+                                            reasoningEffort: nil,
                                             processor: context.processor,
                                             cannotDisableMessage:
                                                 "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
@@ -2663,13 +2680,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             messages: [Chat.Message],
             config: ReasoningConfig,
             thinkingEnabled: Bool?,
+            reasoningEffort: ReasoningEffort? = nil,
             processor: any UserInputProcessor,
             cannotDisableMessage: String
         ) async throws -> LMInput {
             let additionalContext: [String: any Sendable]?
             do {
-                additionalContext = try config.promptStrategy
-                    .additionalContext(forThinkingEnabled: thinkingEnabled)
+                additionalContext = try reasoningPromptAdditionalContext(
+                    config: config,
+                    thinkingEnabled: thinkingEnabled,
+                    reasoningEffort: reasoningEffort)
             } catch ReasoningError.cannotDisableReasoning {
                 throw LanguageModelError.unsupportedCapability(
                     LanguageModelError.UnsupportedCapability(
@@ -2678,6 +2698,63 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
             return try await processor.prepare(
                 input: UserInput(chat: messages, additionalContext: additionalContext))
+        }
+
+        /// Builds the model-family prompt context shared by direct schema
+        /// preparation and the allowed-tool-to-schema re-prompt. Keeping this
+        /// operation here prevents those branches from drifting between the
+        /// typed effort value and a legacy Boolean-only context.
+        static func reasoningPromptAdditionalContext(
+            config: ReasoningConfig,
+            thinkingEnabled: Bool?,
+            reasoningEffort: ReasoningEffort? = nil
+        ) throws -> [String: any Sendable]? {
+            try config.promptStrategy.additionalContext(
+                forThinkingEnabled: thinkingEnabled,
+                reasoningEffort: reasoningEffort)
+        }
+
+        /// Maps FoundationModels' reasoning levels to the selected model
+        /// protocol. Effort templates receive a typed low/medium/high value;
+        /// their `.custom(...)` surface is intentionally unsupported because
+        /// arbitrary strings are not a model-family-neutral contract.
+        static func reasoningPromptContext(
+            config: ReasoningConfig?,
+            level: ContextOptions.ReasoningLevel?
+        ) throws -> (thinkingEnabled: Bool?, reasoningEffort: ReasoningEffort?) {
+            guard let config else { return (nil, nil) }
+
+            switch config.promptStrategy {
+            case .templateEffort(_, let defaultEffort):
+                let effort: ReasoningEffort
+                switch level {
+                case nil:
+                    effort = defaultEffort
+                case .light:
+                    effort = .low
+                case .moderate:
+                    effort = .medium
+                case .deep:
+                    effort = .high
+                case .custom:
+                    throw LanguageModelError.unsupportedCapability(
+                        LanguageModelError.UnsupportedCapability(
+                            capability: .reasoning,
+                            debugDescription:
+                                "Custom reasoning levels are unsupported for this model's typed effort prompt strategy."
+                        ))
+                @unknown default:
+                    throw LanguageModelError.unsupportedCapability(
+                        LanguageModelError.UnsupportedCapability(
+                            capability: .reasoning,
+                            debugDescription:
+                                "Unknown reasoning levels are unsupported for this model's typed effort prompt strategy."
+                        ))
+                }
+                return (nil, effort)
+            case .templateFlag, .alwaysOn, .none:
+                return (thinkingEnabled(for: level), nil)
+            }
         }
 
         /// GPT-OSS maps the first system message to Harmony's developer role.
@@ -2709,9 +2786,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         /// Maps a requested reasoning level to a thinking on/off/unspecified
-        /// flag. `nil` (no opinion) defers to the strategy's default; any
-        /// concrete level means "think" (v1 does not modulate depth); only the
-        /// package convention `.custom("no_think")` means "off".
+        /// flag for toggleable prompt strategies. Typed effort strategies use
+        /// ``reasoningPromptContext(config:level:)`` instead; only the package
+        /// convention `.custom("no_think")` means "off" here.
         static func thinkingEnabled(for level: ContextOptions.ReasoningLevel?) -> Bool? {
             guard let level else { return nil }
             switch level {
@@ -2743,6 +2820,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             switch config.promptStrategy {
             case .templateFlag:
                 return config
+            case .templateEffort:
+                return nil
             case .none where format == .atem:
                 return config
             case .none, .alwaysOn:

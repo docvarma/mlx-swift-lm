@@ -2,6 +2,15 @@
 
 import Foundation
 
+// MARK: - ReasoningEffort
+
+/// A model-native reasoning depth understood by a prompt template.
+public enum ReasoningEffort: String, Sendable, Equatable {
+    case low
+    case medium
+    case high
+}
+
 // MARK: - ReasoningError
 
 /// Errors raised while resolving or applying a model's reasoning configuration.
@@ -17,11 +26,13 @@ public enum ReasoningError: Error, Equatable {
 
 // MARK: - ReasoningPromptStrategy
 
-/// How a model's "thinking on / off" preference is expressed to its chat template.
+/// How a model's reasoning preference is expressed to its chat template.
 ///
 /// `MLXLMCommon` deliberately does not depend on `FoundationModels`, so this
-/// takes a plain `Bool?` (think on / off / unspecified) rather than a
-/// `FoundationModels` reasoning level. The level → `Bool?` mapping lives in the
+/// uses the package's own ``ReasoningEffort`` for model-native depth and a
+/// plain `Bool?` for toggleable on / off / unspecified behavior, while typed
+/// effort strategies carry a ``ReasoningEffort``. The `FoundationModels`
+/// reasoning-level mapping lives in the
 /// `MLXFoundationModels` layer, mirroring how ``ToolCallFormat`` carries no
 /// `FoundationModels`-typed mirror.
 public enum ReasoningPromptStrategy: Sendable, Equatable {
@@ -31,27 +42,43 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
     /// model's own template default.
     case templateFlag(key: String, defaultOn: Bool)
 
+    /// Selects a model-native reasoning depth through a chat-template keyword
+    /// argument (for example GPT-OSS Harmony's `reasoning_effort`).
+    case templateEffort(key: String, defaultEffort: ReasoningEffort)
+
     /// The model always reasons and cannot be turned off (e.g. DeepSeek-R1).
     case alwaysOn
 
     /// The model has no prompt-level thinking control.
     case none
 
-    /// Maps a "thinking enabled" preference to the chat-template
-    /// `additionalContext` it implies.
+    /// Maps a thinking preference and, when supported, typed reasoning effort
+    /// to the chat-template `additionalContext` they imply.
     ///
     /// - Parameter thinkingEnabled: `true` / `false` to force thinking on / off,
-    ///   `nil` when the caller expressed no preference.
+    ///   `nil` when the caller expressed no preference. For
+    ///   ``templateEffort``, `false` is rejected because effort templates are
+    ///   non-suppressible; otherwise this value only supplies that guard.
+    /// - Parameter reasoningEffort: a typed low / medium / high effort for
+    ///   ``templateEffort``, or `nil` to use its declared default. It is
+    ///   ignored by the other strategies.
     /// - Returns: the `additionalContext` to merge into the rendered prompt, or
     ///   `nil` when no context needs to be injected.
     /// - Throws: ``ReasoningError/cannotDisableReasoning`` when `false` is
-    ///   requested on a non-suppressible strategy (``alwaysOn`` or ``none``).
+    ///   requested on a non-suppressible strategy (``templateEffort``,
+    ///   ``alwaysOn``, or ``none``).
     public func additionalContext(
-        forThinkingEnabled thinkingEnabled: Bool?
+        forThinkingEnabled thinkingEnabled: Bool?,
+        reasoningEffort: ReasoningEffort? = nil
     ) throws -> [String: any Sendable]? {
         switch self {
         case .templateFlag(let key, let defaultOn):
             return [key: thinkingEnabled ?? defaultOn]
+        case .templateEffort(let key, let defaultEffort):
+            if thinkingEnabled == false {
+                throw ReasoningError.cannotDisableReasoning
+            }
+            return [key: (reasoningEffort ?? defaultEffort).rawValue]
         case .alwaysOn:
             if thinkingEnabled == false {
                 throw ReasoningError.cannotDisableReasoning
@@ -75,7 +102,7 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
 
 /// Describes a model's reasoning (chain-of-thought) protocol: the delimiters
 /// that bracket its thinking in the decoded generation stream, and how thinking
-/// is toggled at prompt time.
+/// is toggled or its typed effort is selected at prompt time.
 ///
 /// Rides on ``ModelConfiguration`` (and therefore ``ResolvedModelConfiguration``)
 /// so model factories and provider bridges resolve it alongside ``ToolCallFormat``.
@@ -87,7 +114,8 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// The marker that closes a reasoning span (e.g. `</think>`).
     public var endDelimiter: String
 
-    /// How a thinking on / off preference is expressed to the chat template.
+    /// How a model's thinking toggle or typed effort preference is expressed
+    /// to the chat template.
     public var promptStrategy: ReasoningPromptStrategy
 
     /// Markers that implicitly leave reasoning without emitting ``endDelimiter``.
@@ -144,13 +172,11 @@ public struct ReasoningConfig: Sendable, Equatable {
         promptStrategy: .alwaysOn)
 
     /// GPT-OSS Harmony reasoning is carried in protocol frames rather than
-    /// `<think>` delimiters. The MLX FoundationModels adapter routes these
-    /// frames with `HarmonyStreamAdapter`; the markers here describe the
-    /// protocol for capability admission and for a safe typed rejection when
-    /// a caller attempts to disable an always-on reasoning model.
+    /// `<think>` delimiters. The template's `reasoning_effort` argument
+    /// selects a low, medium, or high analysis budget; the default is medium.
     public static let harmonyChannels = ReasoningConfig(
         startDelimiter: "<|channel|>analysis<|message|>",
         endDelimiter: "<|end|>",
-        promptStrategy: .none,
+        promptStrategy: .templateEffort(key: "reasoning_effort", defaultEffort: .medium),
         isSpecialToken: true)
 }

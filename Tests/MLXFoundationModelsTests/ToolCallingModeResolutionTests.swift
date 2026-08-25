@@ -79,6 +79,7 @@ struct ToolCallingModeResolutionTests {
         let onyx = ReasoningConfig(
             startDelimiter: "to=self<|message|>", endDelimiter: "<|eom|>",
             promptStrategy: .none)
+        let harmony = ReasoningConfig.harmonyChannels
 
         #expect(
             MLXLanguageModel.Executor.toolReasoningConfig(
@@ -92,6 +93,72 @@ struct ToolCallingModeResolutionTests {
         #expect(
             MLXLanguageModel.Executor.toolReasoningConfig(
                 declared: true, config: onyx, format: .atem, thinkingEnabled: false) == nil)
+        #expect(
+            MLXLanguageModel.Executor.toolReasoningConfig(
+                declared: true, config: harmony, format: .gptOSS, thinkingEnabled: true) == nil)
+    }
+
+    @Test func effortReasoningMapsFoundationLevels() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let config = ReasoningConfig.harmonyChannels
+
+        #expect(
+            try MLXLanguageModel.Executor.reasoningPromptContext(
+                config: config, level: nil
+            ).reasoningEffort == .medium)
+        #expect(
+            try MLXLanguageModel.Executor.reasoningPromptContext(
+                config: config, level: .light
+            ).reasoningEffort == .low)
+        #expect(
+            try MLXLanguageModel.Executor.reasoningPromptContext(
+                config: config, level: .moderate
+            ).reasoningEffort == .medium)
+        #expect(
+            try MLXLanguageModel.Executor.reasoningPromptContext(
+                config: config, level: .deep
+            ).reasoningEffort == .high)
+    }
+
+    @Test(arguments: ["no_think", "low", "medium", "high", "future_effort"])
+    func effortReasoningRejectsCustomLevels(_ customLevel: String) throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        do {
+            _ = try MLXLanguageModel.Executor.reasoningPromptContext(
+                config: .harmonyChannels, level: .custom(customLevel))
+            Issue.record("Expected custom effort level to be rejected")
+        } catch LanguageModelError.unsupportedCapability(let capability) {
+            #expect(capability.debugDescription.contains("Custom reasoning levels"))
+        }
+    }
+
+    @Test func effortContextBuildsSharedAdditionalContext() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let context = try MLXLanguageModel.Executor.reasoningPromptContext(
+            config: .harmonyChannels, level: .light)
+        let additionalContext = try MLXLanguageModel.Executor.reasoningPromptAdditionalContext(
+            config: .harmonyChannels,
+            thinkingEnabled: context.thinkingEnabled,
+            reasoningEffort: context.reasoningEffort)
+
+        #expect(additionalContext?["reasoning_effort"] as? String == "low")
+        #expect(additionalContext?["enable_thinking"] == nil)
+    }
+
+    @Test func templateFlagRetainsNoThinkConvention() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let config = ReasoningConfig.thinkTagsWithEnableThinking
+
+        let disabled = try MLXLanguageModel.Executor.reasoningPromptContext(
+            config: config, level: .custom("no_think"))
+        #expect(disabled.thinkingEnabled == false)
+        #expect(disabled.reasoningEffort == nil)
+
+        let enabled = try MLXLanguageModel.Executor.reasoningPromptContext(
+            config: config, level: .custom("other"))
+        #expect(enabled.thinkingEnabled == true)
+        #expect(enabled.reasoningEffort == nil)
     }
 }
 

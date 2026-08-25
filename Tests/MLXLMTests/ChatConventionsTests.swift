@@ -229,7 +229,9 @@ struct ChatConventionsTests {
         let config = ReasoningConfig.harmonyChannels
         #expect(config.startDelimiter == "<|channel|>analysis<|message|>")
         #expect(config.endDelimiter == "<|end|>")
-        #expect(config.promptStrategy == .none)
+        #expect(
+            config.promptStrategy
+                == .templateEffort(key: "reasoning_effort", defaultEffort: .medium))
         #expect(config.isSpecialToken)
     }
 
